@@ -81,8 +81,11 @@
                 <button class="control-btn" id="copy-btn" onclick="copyConversation()" title="Copy to clipboard (filtered if a date range is set)" disabled>
                     <span class="icon">📋</span><span>Copy</span>
                 </button>
-                <button class="control-btn" id="export-btn" onclick="exportConversation()" title="Export (filtered if a date range is set)" disabled>
+                <button class="control-btn" id="export-btn" onclick="exportConversation()" title="Export readable TXT (full tool input + output; filtered if a date range is set)" disabled>
                     <span class="icon">📥</span><span>Export</span>
+                </button>
+                <button class="control-btn" id="export-raw-btn" onclick="exportRawConversation()" title="Export the exact raw source file (everything, nothing omitted)" disabled>
+                    <span class="icon">🧬</span><span>Raw</span>
                 </button>
                 <button class="control-btn" id="sync-btn" onclick="manualSync()" title="Sync data now">
                     <span class="icon">🔄</span><span>Sync</span>

@@ -14,6 +14,20 @@ function exportConversation() {
     setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
 }
 
+function exportRawConversation() {
+    if (!currentProjectId || !currentSessionId) return;
+    // Server streams the exact source file — the complete raw record.
+    var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
+        '/sessions/' + encodeURIComponent(currentSessionId) +
+        '/export-raw?source=' + encodeURIComponent(currentSource);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = (currentSessionId || 'conversation') + '.raw.jsonl';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
 async function copyConversation() {
     if (!currentConversation) return;
     var msgs = (typeof getChronologicalMessages === 'function') ? getChronologicalMessages() : currentConversation.messages;
@@ -54,10 +68,15 @@ function buildConversationText(conv, messages) {
                 lines.push('[TOOL: ' + tool.name + ']');
                 // Full, untruncated input. Objects rendered as pretty JSON so
                 // every field/value is preserved exactly, bit for bit.
+                lines.push('INPUT:');
                 if (tool.input && typeof tool.input === 'object') {
                     lines.push(JSON.stringify(tool.input, null, 2));
                 } else {
                     lines.push(String(tool.input == null ? '' : tool.input));
+                }
+                if (tool.result != null && String(tool.result).length) {
+                    lines.push('OUTPUT:');
+                    lines.push(String(tool.result));
                 }
             });
         }

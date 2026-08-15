@@ -572,6 +572,8 @@ function renderConversation(conv) {
 
     var exportBtn = document.getElementById('export-btn');
     var copyBtn = document.getElementById('copy-btn');
+    var rawBtn = document.getElementById('export-raw-btn');
     if (exportBtn) exportBtn.disabled = false;
     if (copyBtn) copyBtn.disabled = false;
+    if (rawBtn) rawBtn.disabled = false;
 }

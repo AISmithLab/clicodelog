@@ -2,10 +2,32 @@ import json
 from pathlib import Path
 
 
+def _stringify_result(content) -> str:
+    """Flatten a tool_result 'content' (str, or list of blocks) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                else:
+                    parts.append(json.dumps(b, ensure_ascii=False))
+            elif isinstance(b, str):
+                parts.append(b)
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return json.dumps(content, ensure_ascii=False)
+
+
 def parse_claude_conversation(session_file: Path, session_id: str) -> dict:
     """Parse Claude Code JSONL conversation format."""
     messages = []
     summaries = []
+    # tool_use_id -> result text (results arrive in later user messages).
+    tool_results: dict = {}
 
     with open(session_file, "r") as f:
         for line_num, line in enumerate(f):
@@ -22,8 +44,22 @@ def parse_claude_conversation(session_file: Path, session_id: str) -> dict:
                     if isinstance(content, list):
                         text_parts = []
                         for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                text_parts.append(block.get("text", ""))
+                            if isinstance(block, dict):
+                                bt = block.get("type")
+                                if bt == "text":
+                                    text_parts.append(block.get("text", ""))
+                                elif bt == "tool_result":
+                                    # Capture the tool's output, keyed by id.
+                                    tid = block.get("tool_use_id")
+                                    res = _stringify_result(block.get("content"))
+                                    # Prefer the richer top-level toolUseResult when present.
+                                    tur = entry.get("toolUseResult")
+                                    if tur is not None:
+                                        res_full = tur if isinstance(tur, str) else json.dumps(tur, indent=2, ensure_ascii=False)
+                                        if res_full and len(res_full) >= len(res):
+                                            res = res_full
+                                    if tid:
+                                        tool_results[tid] = res
                             elif isinstance(block, str):
                                 text_parts.append(block)
                         content = "\n".join(text_parts)
@@ -56,6 +92,7 @@ def parse_claude_conversation(session_file: Path, session_id: str) -> dict:
                                 tool_uses.append({
                                     "name": block.get("name", ""),
                                     "input": block.get("input", {}),
+                                    "id": block.get("id"),
                                 })
 
                     messages.append({
@@ -72,5 +109,12 @@ def parse_claude_conversation(session_file: Path, session_id: str) -> dict:
             except json.JSONDecodeError as e:
                 print(f"Error parsing line {line_num}: {e}")
                 continue
+
+    # Second pass: attach each tool's captured result to its tool_use.
+    for m in messages:
+        for tu in (m.get("tool_uses") or []):
+            tid = tu.get("id")
+            if tid and tid in tool_results:
+                tu["result"] = tool_results[tid]
 
     return {"summaries": summaries, "messages": messages, "session_id": session_id}

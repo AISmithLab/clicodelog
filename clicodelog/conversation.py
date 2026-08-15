@@ -5,6 +5,14 @@ from .parsers import parse_claude_conversation, parse_codex_conversation, parse_
 from .utils import decode_path_id, get_codex_cwd, get_gemini_project_hash
 
 
+def find_session_path(project_id: str, session_id: str, source_id: str):
+    """Public: resolve a session's raw source file path (or None)."""
+    if source_id not in SOURCES:
+        return None
+    data_dir = DATA_DIR / SOURCES[source_id]["data_subdir"]
+    return _find_session_file(data_dir, project_id, session_id, source_id)
+
+
 def get_conversation(project_id: str, session_id: str, source_id: str) -> dict:
     if source_id not in SOURCES:
         return {"error": "Unknown source"}
