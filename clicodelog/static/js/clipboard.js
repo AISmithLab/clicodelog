@@ -52,13 +52,12 @@ function buildConversationText(conv, messages) {
             lines.push('');
             msg.tool_uses.forEach(function(tool) {
                 lines.push('[TOOL: ' + tool.name + ']');
-                if (typeof tool.input === 'object') {
-                    Object.entries(tool.input).forEach(function(entry) {
-                        var val = String(entry[1]);
-                        lines.push('  ' + entry[0] + ': ' + (val.length > 200 ? val.substring(0, 200) + '...' : val));
-                    });
+                // Full, untruncated input. Objects rendered as pretty JSON so
+                // every field/value is preserved exactly, bit for bit.
+                if (tool.input && typeof tool.input === 'object') {
+                    lines.push(JSON.stringify(tool.input, null, 2));
                 } else {
-                    lines.push('  ' + (tool.input || ''));
+                    lines.push(String(tool.input == null ? '' : tool.input));
                 }
             });
         }

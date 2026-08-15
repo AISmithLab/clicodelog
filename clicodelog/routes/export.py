@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 
 from fastapi import APIRouter
@@ -39,12 +40,12 @@ async def api_export(project_id: str, session_id: str, source: Optional[str] = N
             lines.append("")
             for tool in msg["tool_uses"]:
                 lines.append(f"[TOOL: {tool['name']}]")
-                if isinstance(tool.get("input"), dict):
-                    for k, v in tool["input"].items():
-                        val = str(v)
-                        lines.append(f"  {k}: {val[:200]}{'...' if len(val) > 200 else ''}")
+                # Full, untruncated input as pretty JSON — nothing is cut off.
+                inp = tool.get("input")
+                if isinstance(inp, (dict, list)):
+                    lines.append(json.dumps(inp, indent=2, ensure_ascii=False))
                 else:
-                    lines.append(f"  {tool.get('input', '')}")
+                    lines.append(str(inp if inp is not None else ""))
         if msg.get("usage"):
             tokens = msg["usage"].get("input_tokens", 0) + msg["usage"].get("output_tokens", 0)
             lines.append(f"\n[Tokens: {tokens}]")
