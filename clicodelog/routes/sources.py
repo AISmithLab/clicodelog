@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 
 from .. import sync as _sync
 from ..config import DATA_DIR, SOURCES
-from ..search_index import entries
+from ..search_index import count as indexed_count
 
 router = APIRouter()
 
@@ -14,7 +14,7 @@ def api_sources():
     for sid, cfg in SOURCES.items():
         source_dir = cfg["source_dir"]
         data_dir = DATA_DIR / cfg["data_subdir"]
-        indexed = len(entries(sid))
+        indexed = indexed_count(sid)      # SELECT count(*), not a full load
 
         # A source whose directory has files but yields no sessions means the
         # vendor changed format and our reader no longer matches. That is

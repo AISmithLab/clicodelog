@@ -38,10 +38,10 @@ def _project_label(project_id: str, source_id: str, conv: dict) -> str:
             return project_id
     if source_id == "gemini":
         return project_id
-    from ..search_index import entries
-    for e in entries(source_id):
-        if e["project_id"] == project_id:
-            return e.get("cwd") or e.get("project_name") or project_id
+    from ..search_index import sessions_for_project
+    rows = sessions_for_project(source_id, project_id, limit=1)
+    if rows:
+        return rows[0].get("cwd") or rows[0].get("project_name") or project_id
     return project_id
 
 

@@ -133,6 +133,27 @@ def get_conversation(project_id: str, session_id: str, source_id: str,
     except OSError:
         return {"error": "Session file unavailable"}
 
+    # Fast path: a windowed read of a Claude session parses only the requested
+    # page. Whole-file parsing is reserved for exports, which genuinely need
+    # tool outputs and the tool_use_id -> result mapping that requires them.
+    if (source_id == "claude-code" and not include_results and limit is not None):
+        try:
+            from .window import read_window
+            messages, total, summaries = read_window(
+                session_file, st.st_size, st.st_mtime, max(0, offset), limit)
+            _strip_tool_results(messages)
+            return {
+                "summaries": summaries,
+                "session_id": session_id,
+                "meta": {"cwd": messages[0].get("cwd") if messages else None},
+                "messages": messages,
+                "total_messages": total,
+                "offset": max(0, offset),
+                "truncated": (max(0, offset) + len(messages)) < total,
+            }
+        except OSError:
+            log.exception("Windowed read failed for %s; falling back", session_file)
+
     key = (str(session_file), st.st_size, st.st_mtime, include_results)
     conv = _cache_get(key)
 

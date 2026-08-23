@@ -364,7 +364,8 @@ def build_index(source_id: str, *, tool_cap: int = DEFAULT_TOOL_CAP,
         conn = _connect()
         _ensure_schema(conn)
 
-        entries = {e["full_path"]: e for e in _idx.entries(source_id)}
+        # A compact {path: (project_id, project_name)} map, not full rows.
+        entries = _idx.path_project_map(source_id)
         data_dir = DATA_DIR / SOURCES[source_id]["data_subdir"]
         paths = [f for f, _ in session_files(source_id, data_dir)]
         total = len(paths)
@@ -380,11 +381,9 @@ def build_index(source_id: str, *, tool_cap: int = DEFAULT_TOOL_CAP,
         seen, nmsg = set(), 0
         for i, path in enumerate(paths):
             seen.add(str(path))
-            e = entries.get(str(path), {})
+            pid, pname = entries.get(str(path), ("", ""))
             try:
-                nmsg += _index_file(conn, path, source_id,
-                                    e.get("project_id", ""), e.get("project_name", ""),
-                                    tool_cap)
+                nmsg += _index_file(conn, path, source_id, pid, pname, tool_cap)
             except sqlite3.Error:
                 log.exception("Indexing failed for %s", path)
             if (i + 1) % 200 == 0:
@@ -571,15 +570,16 @@ def search_content(query: str, source_id: str, *, limit: int = 50,
             })
     out = sorted(sessions.values(), key=lambda s: s["rank"])[:limit]
 
-    # Fill in summaries from the metadata index so results are readable.
+    # Fill in summaries for just these results, rather than loading every row.
     from . import search_index as _idx
-    by_key = {(e["project_id"], e["session_id"]): e for e in _idx.entries(source_id)}
+    keys = [(s["project_id"], s["session_id"]) for s in out]
+    lookup = _idx.summaries_for(source_id, keys)
     for s in out:
-        e = by_key.get((s["project_id"], s["session_id"]))
+        e = lookup.get((s["project_id"], s["session_id"]))
         if e:
-            s["summary"] = e.get("summary", "")
-            s["cwd"] = e.get("cwd", "")
-            s["last_ts"] = s["last_ts"] or e.get("last_ts")
+            s["summary"] = e["summary"]
+            s["cwd"] = e["cwd"]
+            s["last_ts"] = s["last_ts"] or e["last_ts"]
     return out
 
 

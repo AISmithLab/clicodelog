@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from clicodelog import search_index, sessions
+from clicodelog import metastore, search_index, sessions
 from clicodelog.scan import scan_session
 
 CLAUDE_LINES = [
@@ -72,18 +72,20 @@ def fake_data(tmp_path, monkeypatch):
                  GEMINI_LINES)
 
     monkeypatch.setattr("clicodelog.config.DATA_DIR", root)
-    monkeypatch.setattr("clicodelog.search_index.DATA_DIR", root)
+    monkeypatch.setattr("clicodelog.metastore.DATA_DIR", root)
     monkeypatch.setattr("clicodelog.sessions.DATA_DIR", root)
     monkeypatch.setattr("clicodelog.conversation.DATA_DIR", root)
     monkeypatch.setattr("clicodelog.projects.DATA_DIR", root)
-    monkeypatch.setattr("clicodelog.search_index.INDEX_FILE", tmp_path / "index.json")
-    search_index._index = {}
-    search_index._meta = {}
-    search_index._loaded = True
+
+    # Each test gets its own database file and its own thread-local connection.
+    monkeypatch.setattr("clicodelog.metastore.DB_FILE", tmp_path / "meta.db")
+    if hasattr(metastore._local, "conn"):
+        metastore._local.conn.close()
+        del metastore._local.conn
     yield root
-    search_index._index = {}
-    search_index._meta = {}
-    search_index._loaded = False
+    if hasattr(metastore._local, "conn"):
+        metastore._local.conn.close()
+        del metastore._local.conn
 
 
 @pytest.mark.parametrize("source_id", ["claude-code", "codex", "gemini"])
@@ -98,9 +100,10 @@ def test_source_yields_at_least_one_session(fake_data, source_id):
     projects = search_index.projects_for_source(source_id)
     assert projects, f"{source_id}: indexed sessions produced no projects"
 
-    listing = sessions.get_sessions(projects[0]["id"], source_id)
-    assert listing, f"{source_id}: project has sessions in the index but lists none"
-    assert listing[0]["message_count"] >= 1
+    page = sessions.get_sessions(projects[0]["id"], source_id)
+    assert page["sessions"], f"{source_id}: project is indexed but lists no sessions"
+    assert page["total"] >= 1
+    assert page["sessions"][0]["message_count"] >= 1
 
 
 def test_gemini_reads_jsonl_not_json(fake_data):
@@ -161,3 +164,34 @@ def test_non_dict_line_is_skipped(tmp_path):
     p.write_text("null\n42\n" + json.dumps(CLAUDE_LINES[1]) + "\n")
     info = scan_session(p, "claude-code")
     assert info is not None and info["message_count"] == 1
+
+
+def test_session_listing_is_paged(fake_data):
+    """A project with 10,581 sessions must not return all of them at once."""
+    search_index.refresh_index("claude-code")
+    projects = search_index.projects_for_source("claude-code")
+    pid = projects[0]["id"]
+
+    page = sessions.get_sessions(pid, "claude-code", limit=1, offset=0)
+    assert len(page["sessions"]) == 1
+    assert page["total"] >= 1
+    assert page["offset"] == 0
+
+
+def test_listing_rows_omit_the_heavy_counter_columns(fake_data):
+    """Listings must not decode the models/tools JSON — that was most of the
+    cost of opening a large project."""
+    search_index.refresh_index("claude-code")
+    projects = search_index.projects_for_source("claude-code")
+    rows = metastore.sessions_for_project("claude-code", projects[0]["id"])
+    assert rows and "models" not in rows[0] and "tools" not in rows[0]
+    # ...but the full accessor still has them, for analytics.
+    full = next(metastore.iter_entries("claude-code"))
+    assert "models" in full and "tools" in full
+
+
+def test_nothing_is_resident_between_queries(fake_data):
+    """The store must not keep a cache of every row."""
+    search_index.refresh_index("claude-code")
+    assert not hasattr(metastore, "_index"), "the in-memory index dict is gone"
+    assert metastore.count("claude-code") >= 1

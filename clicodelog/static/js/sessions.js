@@ -57,6 +57,24 @@ function renderSessions(sessions) {
         frag.appendChild(buildSessionItem(session, false));
     });
     container.appendChild(frag);
+
+    // Say plainly when the project holds more than has been fetched, rather
+    // than looking like the list simply ends here.
+    if (sessionTotal > currentSessions.length) {
+        var footer = document.createElement('div');
+        footer.className = 'sessions-footer';
+        var label = document.createElement('span');
+        label.textContent = 'Showing ' + currentSessions.length +
+            ' of ' + sessionTotal.toLocaleString();
+        var btn = document.createElement('button');
+        btn.id = 'load-more-sessions';
+        btn.className = 'retry-btn';
+        btn.textContent = 'Load ' + Math.min(SESSION_PAGE, sessionTotal - currentSessions.length) + ' more';
+        btn.onclick = loadMoreSessions;
+        footer.appendChild(label);
+        footer.appendChild(btn);
+        container.appendChild(footer);
+    }
 }
 
 // Selection used to call applySessionFilters(), rebuilding every node in a
@@ -170,9 +188,12 @@ async function selectSession(sessionId, opts) {
     setPanel('conversation-content', loadingSpinner('Loading conversation...'));
 
     try {
+        // Ask for a window. Without a limit the server parses the whole file:
+        // 604 MB of RSS and a 138 MB response for the largest session here.
         var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
             '/sessions/' + encodeURIComponent(sessionId) +
-            '?source=' + encodeURIComponent(currentSource);
+            '?source=' + encodeURIComponent(currentSource) +
+            '&limit=' + CONV_PAGE;
         var r = await fetch(url);
 
         // Click a big session, then a small one: the big response can land last

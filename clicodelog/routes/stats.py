@@ -17,21 +17,12 @@ from fastapi.responses import JSONResponse
 from .. import sync as _sync
 from ..config import SOURCES
 from ..logging_setup import get_logger
-from ..search_index import entries
+from ..search_index import json_counter_totals, usage_by, usage_totals
 
 router = APIRouter()
 log = get_logger(__name__)
 
 USAGE_KEYS = ("input", "output", "cache_read", "cache_creation")
-
-
-def _blank():
-    return {k: 0 for k in USAGE_KEYS}
-
-
-def _add(into: dict, usage: dict) -> None:
-    for k in USAGE_KEYS:
-        into[k] += usage.get(k) or 0
 
 
 def _billable(usage: dict) -> int:
@@ -41,7 +32,12 @@ def _billable(usage: dict) -> int:
 @router.get("/api/stats")
 def api_stats(source: Optional[str] = None, group: str = "day",
               project: Optional[str] = None):
-    """Aggregate token usage by day, project or model."""
+    """Aggregate token usage by day, project, model or tool.
+
+    Everything is summed by SQL. Building these totals in Python meant loading
+    every session row into memory first, which is what the metadata store was
+    moved to SQLite to avoid.
+    """
     source_id = source or _sync.current_source
     if source_id != "all" and source_id not in SOURCES:
         return JSONResponse({"error": "Unknown source"}, status_code=400)
@@ -51,52 +47,43 @@ def api_stats(source: Optional[str] = None, group: str = "day",
 
     sources = list(SOURCES) if source_id == "all" else [source_id]
 
-    buckets: dict = defaultdict(_blank)
-    counts: dict = defaultdict(int)
-    tool_counts: dict = defaultdict(int)
-    totals = _blank()
+    totals = {k: 0 for k in USAGE_KEYS}
     sessions = 0
-    models_seen: dict = defaultdict(int)
+    models: dict = defaultdict(int)
+    tools: dict = defaultdict(int)
+    merged: dict = defaultdict(lambda: {k: 0 for k in USAGE_KEYS} | {"sessions": 0})
 
     for sid in sources:
-        for e in entries(sid):
-            if project and e["project_id"] != project:
-                continue
-            usage = e.get("usage") or {}
-            sessions += 1
-            _add(totals, usage)
+        t = usage_totals(sid, project)
+        sessions += t.pop("sessions", 0)
+        for k in USAGE_KEYS:
+            totals[k] += t.get(k, 0)
 
-            for name, n in (e.get("models") or {}).items():
-                models_seen[name] += n
-            for name, n in (e.get("tools") or {}).items():
-                tool_counts[name] += n
+        for name, n in json_counter_totals(sid, "models", limit=50).items():
+            models[name] += n
+        for name, n in json_counter_totals(sid, "tools", limit=50).items():
+            tools[name] += n
 
-            if group == "day":
-                ts = e.get("last_ts") or e.get("first_ts") or ""
-                key = ts[:10] or "unknown"
-            elif group == "project":
-                key = e.get("project_name") or e["project_id"]
-            elif group == "model":
-                names = e.get("models") or {}
-                key = max(names.items(), key=lambda kv: kv[1])[0] if names else "unknown"
-            else:
-                for name, n in (e.get("tools") or {}).items():
-                    counts[name] += n
-                continue
-
-            _add(buckets[key], usage)
-            counts[key] += 1
+        if group in ("day", "project"):
+            for row in usage_by(sid, group, project):
+                bucket = merged[row["key"]]
+                bucket["sessions"] += row["sessions"]
+                for k in USAGE_KEYS:
+                    bucket[k] += row["usage"][k]
 
     if group == "tool":
         rows = [{"key": k, "count": v} for k, v in
-                sorted(counts.items(), key=lambda kv: -kv[1])]
+                sorted(tools.items(), key=lambda kv: -kv[1])]
+    elif group == "model":
+        rows = [{"key": k, "count": v} for k, v in
+                sorted(models.items(), key=lambda kv: -kv[1])]
     else:
         rows = [{
             "key": k,
-            "sessions": counts[k],
-            "usage": v,
-            "total_tokens": _billable(v),
-        } for k, v in buckets.items()]
+            "sessions": v["sessions"],
+            "usage": {kk: v[kk] for kk in USAGE_KEYS},
+            "total_tokens": sum(v[kk] for kk in USAGE_KEYS),
+        } for k, v in merged.items()]
         rows.sort(key=lambda r: r["key"] if group == "day" else -r["total_tokens"],
                   reverse=(group == "day"))
 
@@ -106,8 +93,8 @@ def api_stats(source: Optional[str] = None, group: str = "day",
         "sessions": sessions,
         "totals": totals,
         "total_tokens": _billable(totals),
-        "models": dict(sorted(models_seen.items(), key=lambda kv: -kv[1])),
-        "top_tools": dict(sorted(tool_counts.items(), key=lambda kv: -kv[1])[:25]),
+        "models": dict(sorted(models.items(), key=lambda kv: -kv[1])[:25]),
+        "top_tools": dict(sorted(tools.items(), key=lambda kv: -kv[1])[:25]),
         "rows": rows[:400],
     }
 

@@ -37,19 +37,33 @@ def _as_session(entry: dict) -> dict:
     }
 
 
-def get_sessions(project_id: str, source_id: str) -> list:
+# A project here holds up to 10,581 sessions. Returning them all costs ~21 MB of
+# server RAM and a 7 MB response for a list nobody scrolls to the end of, so the
+# listing is paged and reports its true total.
+DEFAULT_PAGE = 500
+
+
+def get_sessions(project_id: str, source_id: str, *,
+                 limit: int | None = DEFAULT_PAGE, offset: int = 0) -> dict:
     if source_id not in SOURCES or not is_safe_id(project_id):
-        return []
+        return {"sessions": [], "total": 0, "offset": 0}
 
-    entries = _idx.sessions_for_project(source_id, project_id)
-    if entries:
-        return [_as_session(e) for e in entries]
+    total = _idx.project_session_count(source_id, project_id)
+    if total:
+        entries = _idx.sessions_for_project(source_id, project_id,
+                                            limit=limit, offset=offset)
+        return {
+            "sessions": [_as_session(e) for e in entries],
+            "total": total,
+            "offset": offset,
+        }
 
-    # Index not built yet (first run, or a source that has never been synced).
-    # Fall back to scanning so the UI is never empty just because of timing.
+    # Index not built yet (first run, or a source never synced). Fall back to
+    # scanning so the UI is never empty just because of timing.
     if _idx.is_ready(source_id):
-        return []
-    return _scan_project(project_id, source_id)
+        return {"sessions": [], "total": 0, "offset": 0}
+    rows = _scan_project(project_id, source_id)
+    return {"sessions": rows, "total": len(rows), "offset": 0}
 
 
 def get_subagent_sessions(project_id: str, session_id: str, source_id: str) -> list:

@@ -44,10 +44,14 @@ def api_projects(source: Optional[str] = None):
 
 
 @router.get("/api/projects/{project_id}/sessions")
-def api_sessions(project_id: str, source: Optional[str] = None):
+def api_sessions(project_id: str, source: Optional[str] = None,
+                 limit: Optional[int] = 500, offset: int = 0):
     if not is_safe_id(project_id):
         return JSONResponse({"error": "Invalid project id"}, status_code=400)
-    return get_sessions(project_id, _resolve_source(source))
+    if limit is not None:
+        limit = max(1, min(limit, 20000))
+    return get_sessions(project_id, _resolve_source(source),
+                        limit=limit, offset=max(0, offset))
 
 
 @router.get("/api/projects/{project_id}/sessions/{session_id}/subagents")

@@ -626,6 +626,13 @@ function setupLazyObserver(messagesDiv) {
         renderNextBatch(messagesDiv);
         var remaining = getActiveMessages().length - lazyOffset;
         if (remaining <= 0) {
+            // Rendered everything downloaded so far \u2014 pull the next page if the
+            // server still has more of this session.
+            if (hasMoreOnServer()) {
+                sentinel.textContent = 'Loading more\u2026';
+                fetchNextConversationPage();
+                return;
+            }
             lazyObserver.disconnect(); lazyObserver = null;
             sentinel.style.display = 'none';
         } else {
@@ -633,6 +640,47 @@ function setupLazyObserver(messagesDiv) {
         }
     }, { root: scrollRoot, rootMargin: '600px' });
     lazyObserver.observe(sentinel);
+}
+
+function hasMoreOnServer() {
+    return !!(currentConversation &&
+        currentConversation.total_messages != null &&
+        currentConversation.messages.length < currentConversation.total_messages);
+}
+
+// Conversations arrive a page at a time so the server never has to parse a
+// whole 966 MB session to show the top of it.
+async function fetchNextConversationPage() {
+    if (convFetchInFlight || !hasMoreOnServer()) return;
+    convFetchInFlight = true;
+    var seq = sessionRequestSeq;
+    try {
+        var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
+            '/sessions/' + encodeURIComponent(currentSessionId) +
+            '?source=' + encodeURIComponent(currentSource) +
+            '&limit=' + CONV_PAGE +
+            '&offset=' + currentConversation.messages.length;
+        var r = await fetch(url);
+        if (seq !== sessionRequestSeq) return;      // switched session mid-flight
+        if (!r.ok) return;
+        var page = await r.json();
+        if (seq !== sessionRequestSeq) return;
+        if (!page || !Array.isArray(page.messages) || !page.messages.length) return;
+
+        currentConversation.messages = currentConversation.messages.concat(page.messages);
+        currentConversation.total_messages = page.total_messages;
+
+        var messagesDiv = document.getElementById('messages-container');
+        if (messagesDiv) {
+            renderNextBatch(messagesDiv);
+            requestAnimationFrame(function() { setupLazyObserver(messagesDiv); });
+        }
+        updateFilterStatus();
+    } catch (e) {
+        // Leave the sentinel in place; scrolling again retries.
+    } finally {
+        convFetchInFlight = false;
+    }
 }
 
 function renderConversation(conv) {

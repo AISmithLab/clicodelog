@@ -171,13 +171,17 @@ async function selectProject(projectId, opts) {
     var seq = ++projectRequestSeq;
     try {
         var r = await fetch('/api/projects/' + encodeURIComponent(projectId) +
-            '/sessions?source=' + encodeURIComponent(currentSource));
+            '/sessions?source=' + encodeURIComponent(currentSource) +
+            '&limit=' + SESSION_PAGE);
         if (seq !== projectRequestSeq) return;      // a newer project was clicked
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        var sessions = await r.json();
+        var data = await r.json();
         if (seq !== projectRequestSeq) return;
-        if (!Array.isArray(sessions)) throw new Error('bad payload');
-        currentSessions = sessions;
+        // Older builds returned a bare array; accept both shapes.
+        var list = Array.isArray(data) ? data : data.sessions;
+        if (!Array.isArray(list)) throw new Error('bad payload');
+        currentSessions = list;
+        sessionTotal = Array.isArray(data) ? list.length : (data.total || list.length);
         document.getElementById('session-filters').style.display = 'flex';
         applySessionFilters();
     } catch (e) {
@@ -186,4 +190,27 @@ async function selectProject(projectId, opts) {
             selectProject(projectId, opts);
         }));
     }
+}
+
+// Fetch the rest of a large project's sessions on demand. Loading all 10,581
+// up front cost ~21 MB of server RAM and a 7 MB response for a list nobody
+// scrolls to the end of.
+async function loadMoreSessions() {
+    if (currentSessions.length >= sessionTotal) return;
+    var btn = document.getElementById('load-more-sessions');
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+    var seq = projectRequestSeq;
+    try {
+        var r = await fetch('/api/projects/' + encodeURIComponent(currentProjectId) +
+            '/sessions?source=' + encodeURIComponent(currentSource) +
+            '&limit=' + SESSION_PAGE + '&offset=' + currentSessions.length);
+        if (seq !== projectRequestSeq) return;
+        var data = await r.json();
+        var list = Array.isArray(data) ? data : data.sessions;
+        if (Array.isArray(list) && list.length) {
+            currentSessions = currentSessions.concat(list);
+            applySessionFilters();
+        }
+    } catch (e) { /* the button is restored below */ }
+    if (btn) { btn.disabled = false; }
 }
