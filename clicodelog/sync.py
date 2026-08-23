@@ -1,5 +1,6 @@
 import ctypes
 import ctypes.util
+import os
 import shutil
 import sys
 import threading
@@ -8,7 +9,10 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import DATA_DIR, SOURCES, SYNC_INTERVAL
-from .utils import get_codex_cwd, get_gemini_project_hash
+from .logging_setup import get_logger
+from .storage import has_free_space
+
+log = get_logger(__name__)
 
 
 # --- APFS clonefile support ---------------------------------------------------
@@ -27,48 +31,98 @@ if sys.platform == "darwin":
         _clonefile = None
 
 
-def _clone_or_copy(src: Path, dest: Path) -> None:
-    """Clone src → dest (APFS COW) if possible, else fall back to copy2."""
+def _clone_or_copy(src: Path, dest: Path) -> bool:
+    """Clone src -> dest (APFS COW) if possible, else copy. dest must not exist."""
     if _clonefile is not None:
-        # clonefile fails if dest already exists, so caller guarantees it doesn't.
         rc = _clonefile(str(src).encode(), str(dest).encode(), 0)
         if rc == 0:
-            return
-        # Any failure (cross-device, unsupported) → fall through to a real copy.
-    shutil.copy2(src, dest)
+            return True
+        # Any failure (cross-device, unsupported) falls through to a real copy.
+    try:
+        shutil.copy2(src, dest)
+        return True
+    except OSError as e:
+        log.warning("Could not copy %s -> %s: %s", src, dest, e)
+        return False
 
 
-def _additive_copy(src: Path, dest: Path) -> None:
-    """Recursively copy src → dest, never deleting from dest.
+def _place_atomically(src: Path, dest: Path) -> bool:
+    """Write src's contents to dest via a temp file and os.replace.
 
-    Files in dest that no longer exist in src are preserved (so deletions in
-    the source — e.g. Claude Code pruning old projects — don't propagate to
-    our local backup). For each source file, only copy when the destination
-    is missing or differs in size/mtime, so re-syncs are cheap. New files are
-    cloned (APFS) when possible so the backup costs almost no extra disk.
+    The previous implementation unlinked dest and then cloned. Two problems:
+    readers hitting that window got a 500, and if the copy failed after the
+    unlink the destination was simply gone — for a file the source tool had
+    already pruned, that backup was the only remaining copy. Nothing is removed
+    now until a complete replacement is in place.
     """
-    if not src.exists():
+    tmp = dest.with_name(f".{dest.name}.tmp-sync")
+    try:
+        if tmp.exists():
+            tmp.unlink()          # our own leftover temp, never user data
+    except OSError:
+        pass
+    if not _clone_or_copy(src, tmp):
+        return False
+    try:
+        os.replace(tmp, dest)     # atomic; readers see old or new, never neither
+        return True
+    except OSError as e:
+        log.warning("Could not place %s: %s", dest, e)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _additive_copy(src: Path, dest: Path, stats: dict) -> None:
+    """Recursively copy src -> dest, never deleting from dest.
+
+    Files in dest that no longer exist in src are preserved, so deletions in the
+    source (e.g. Claude Code pruning old projects) don't propagate to the local
+    backup. Only files missing or differing in size/mtime are copied.
+    """
+    try:
+        if src.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+            # scandir carries type info from the directory read, avoiding a
+            # separate stat syscall per entry.
+            with os.scandir(src) as it:
+                for entry in it:
+                    _additive_copy(Path(entry.path), dest / entry.name, stats)
+            return
+    except OSError as e:
+        log.warning("Could not walk %s: %s", src, e)
         return
-    if src.is_dir():
-        dest.mkdir(parents=True, exist_ok=True)
-        for entry in src.iterdir():
-            _additive_copy(entry, dest / entry.name)
+
+    try:
+        s = src.stat()
+    except OSError:
         return
+
     if dest.exists():
         try:
-            s = src.stat()
             d = dest.stat()
             if s.st_size == d.st_size and d.st_mtime >= s.st_mtime:
+                stats["skipped"] += 1
                 return
         except OSError:
             pass
-        # Content changed: replace so we can clone afresh.
-        try:
-            dest.unlink()
-        except OSError:
-            shutil.copy2(src, dest)
-            return
-    _clone_or_copy(src, dest)
+
+    ok, free = has_free_space(dest.parent, s.st_size, margin=1.05)
+    if not ok:
+        stats["skipped_no_space"] += 1
+        if not stats.get("_warned_space"):
+            stats["_warned_space"] = True
+            log.warning("Low disk (%.0f MB free) — skipping copies that would not fit. "
+                        "Existing backups are untouched.", free / 1e6)
+        return
+
+    if _place_atomically(src, dest):
+        stats["copied"] += 1
+    else:
+        stats["failed"] += 1
+
 
 sync_lock = threading.Lock()
 last_sync_time: dict = {}
@@ -76,70 +130,61 @@ current_source: str = "claude-code"
 # Optional case-insensitive substring; when set, the projects API only returns
 # folders whose id/name contains it (CLI: --folder <name>). None = show all.
 folder_filter: str | None = None
+initial_sync_done: bool = False
 
 
-def sync_data(source_id: str | None = None, silent: bool = False) -> bool:
-    """Copy data from source directory to ~/.clicodelog/data/{source}/."""
-    global last_sync_time
-
+def sync_data(source_id: str | None = None, silent: bool = False,
+              *, refresh: bool = True) -> bool:
+    """Copy data from a source directory into ~/.clicodelog/data/{source}/."""
     if source_id is None:
         source_id = current_source
 
     if source_id not in SOURCES:
-        if not silent:
-            print(f"Unknown source: {source_id}")
+        log.error("Unknown source: %s", source_id)
         return False
 
     source_config = SOURCES[source_id]
     source_dir = source_config["source_dir"]
     dest_dir = DATA_DIR / source_config["data_subdir"]
 
+    if not source_dir.exists():
+        log.info("Source directory not found: %s", source_dir)
+        return False
+
+    stats = {"copied": 0, "skipped": 0, "failed": 0, "skipped_no_space": 0}
+    started = time.monotonic()
+
+    # The lock covers the copy only. Counting and indexing used to run inside it
+    # too, so a POST /api/sync could block on a background sync for its whole
+    # duration.
     with sync_lock:
-        if not source_dir.exists():
-            if not silent:
-                print(f"Source directory not found: {source_dir}")
-            return False
-
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        log.info("Syncing %s from %s", source_config["name"], source_dir)
+        _additive_copy(source_dir, dest_dir, stats)
 
-        if not silent:
-            print(f"Syncing {source_config['name']} from {source_dir} to {dest_dir}...")
+    last_sync_time[source_id] = datetime.now()
 
-        # Additive sync: copy new/updated files into dest, but never delete
-        # from dest. If Claude (or another tool) removes a project upstream,
-        # we keep our local copy. This trades a little disk space for the
-        # ability to recover sessions the source has pruned.
-        _additive_copy(source_dir, dest_dir)
-
-        if source_id == "claude-code":
-            project_count = sum(1 for p in dest_dir.iterdir() if p.is_dir())
-            session_count = sum(1 for p in dest_dir.iterdir() if p.is_dir() for _ in p.rglob("*.jsonl"))
-        elif source_id == "codex":
-            session_files = list(dest_dir.rglob("*.jsonl"))
-            session_count = len(session_files)
-            project_count = len(set(get_codex_cwd(f) for f in session_files if get_codex_cwd(f)))
-        else:  # gemini
-            session_files = list(dest_dir.rglob("chats/session-*.json"))
-            session_count = len(session_files)
-            project_count = len(set(get_gemini_project_hash(f) for f in session_files if get_gemini_project_hash(f)))
-
-        last_sync_time[source_id] = datetime.now()
-
-        # Keep the search index current right after the data changes.
+    counts = {}
+    if refresh:
+        # The index refresh walks the tree anyway, so take the counts from it
+        # instead of doing a second (and for codex, file-opening) pass.
         try:
             from .search_index import refresh_index
-            refresh_index(source_id)
-        except Exception as e:
-            if not silent:
-                print(f"  (index refresh skipped: {e})")
+            counts = refresh_index(source_id).get(source_id, {})
+        except Exception:
+            log.exception("Index refresh failed after syncing %s", source_id)
 
-        if not silent:
-            print(f"Synced {project_count} projects with {session_count} sessions")
-        else:
-            ts = last_sync_time[source_id].strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{ts}] Background sync ({source_config['name']}): {project_count} projects, {session_count} sessions")
+    if stats["failed"] or stats["skipped_no_space"]:
+        log.warning("Sync %s: %d copied, %d failed, %d skipped for space",
+                    source_id, stats["copied"], stats["failed"], stats["skipped_no_space"])
 
-        return True
+    msg = (f"Sync {source_config['name']}: {counts.get('projects', '?')} projects, "
+           f"{counts.get('sessions', '?')} sessions, {stats['copied']} new files "
+           f"in {time.monotonic() - started:.1f}s")
+    log.info(msg)
+    if not silent:
+        print(f"  {msg}")
+    return True
 
 
 def background_sync():
@@ -149,5 +194,30 @@ def background_sync():
         for source_id in SOURCES:
             try:
                 sync_data(source_id=source_id, silent=True)
-            except Exception as e:
-                print(f"[Background sync error for {source_id}] {e}")
+            except Exception:
+                log.exception("Background sync failed for %s", source_id)
+
+
+def initial_sync(skip: bool = False):
+    """Run the startup sync off the request path.
+
+    This used to run synchronously before uvicorn bound its port — 9.8 seconds
+    of blank terminal, and minutes on a first run. The data directory already
+    holds the previous run's copy, so the UI is fully usable while this happens.
+    """
+    global initial_sync_done
+    try:
+        if not skip:
+            for source_id in SOURCES:
+                try:
+                    sync_data(source_id=source_id, silent=True)
+                except Exception:
+                    log.exception("Initial sync failed for %s", source_id)
+        else:
+            from .search_index import refresh_index
+            refresh_index()
+    except Exception:
+        log.exception("Initial sync/refresh failed")
+    finally:
+        initial_sync_done = True
+        log.info("Initial sync complete")

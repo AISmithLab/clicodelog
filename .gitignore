@@ -32,3 +32,6 @@ dist/
 *.egg-info/
 *.egg
 .eggs/
+
+# MCP browser session artifacts
+.playwright-mcp/

@@ -1,3 +1,5 @@
+var projectRequestSeq = 0;
+
 async function loadSources() {
     try {
         const data = await fetch('/api/sources').then(r => r.json());
@@ -10,10 +12,31 @@ async function loadSources() {
             opt.value = s.id;
             opt.selected = s.id === currentSource;
             opt.disabled = !s.available;
-            opt.textContent = s.name + (!s.available ? ' (not found)' : '');
+            var label = s.name;
+            if (!s.available) label += ' (not found)';
+            else if (s.warning) label += ' (unreadable)';
+            else if (s.session_count) label += ' (' + s.session_count + ')';
+            opt.textContent = label;
             select.appendChild(opt);
         });
+        // A source with files on disk but nothing readable means the vendor
+        // changed format. Say so rather than showing an empty list, which is
+        // how Gemini stayed broken unnoticed.
+        var broken = availableSources.filter(function(s) { return s.warning; });
+        if (broken.length) {
+            console.warn('Sources present but unreadable:',
+                broken.map(function(s) { return s.id; }).join(', '));
+            showSourceWarning(broken);
+        }
     } catch (e) { console.error('Error loading sources:', e); }
+}
+
+function showSourceWarning(broken) {
+    var bar = document.getElementById('source-warning');
+    if (!bar) return;
+    bar.textContent = broken.map(function(s) { return s.name; }).join(', ') +
+        ': files found but none could be read. The log format may have changed.';
+    bar.style.display = 'block';
 }
 
 async function changeSource(sourceId) {
@@ -27,7 +50,7 @@ async function changeSource(sourceId) {
     document.getElementById('session-filters').style.display = 'none';
     resetSessionFilters();
     activeTagFilter = null;
-    conversationCache = {};
+    cacheClear();
     document.getElementById('conv-filter-bar').style.display = 'none';
     setPanel('sessions-list', emptyState('📁', 'Select a project to view sessions'));
     setPanel('conversation-content', emptyState('💬', 'Select a session to view the conversation', 'AI Conversation History'));
@@ -76,6 +99,7 @@ function renderProjects(projectsList) {
     filtered.forEach(function(project) {
         const item = document.createElement('div');
         item.className = 'list-item' + (project.id === currentProjectId ? ' active' : '');
+        item.dataset.projectId = project.id;
         item.onclick = function() { selectProject(project.id); };
         const editBtn = document.createElement('button');
         editBtn.className = 'edit-btn';
@@ -122,16 +146,44 @@ async function openEditProject(projectId) {
     } catch (e) { console.error('Error saving project metadata:', e); }
 }
 
-async function selectProject(projectId) {
+// Moving the highlight used to re-render the whole project list.
+function markActiveProject(projectId) {
+    var container = document.getElementById('projects-list');
+    if (!container) return;
+    container.querySelectorAll('.list-item.active').forEach(function(el) {
+        el.classList.remove('active');
+    });
+    var next = container.querySelector('.list-item[data-project-id="' + CSS.escape(projectId) + '"]');
+    if (next) next.classList.add('active');
+}
+
+async function selectProject(projectId, opts) {
+    opts = opts || {};
     currentProjectId = projectId;
-    currentSessionId = null;
-    renderProjects(projects);
+    if (!opts.keepSession) currentSessionId = null;
+    markActiveProject(projectId);
+    if (!suppressRouting && !opts.keepSession && typeof pushRoute === 'function') pushRoute();
+
     document.getElementById('export-btn').disabled = true;
     document.getElementById('copy-btn').disabled = true;
     setPanel('sessions-list', loadingSpinner('Loading sessions...'));
+
+    var seq = ++projectRequestSeq;
     try {
-        currentSessions = await fetch('/api/projects/' + projectId + '/sessions?source=' + currentSource).then(r => r.json());
+        var r = await fetch('/api/projects/' + encodeURIComponent(projectId) +
+            '/sessions?source=' + encodeURIComponent(currentSource));
+        if (seq !== projectRequestSeq) return;      // a newer project was clicked
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var sessions = await r.json();
+        if (seq !== projectRequestSeq) return;
+        if (!Array.isArray(sessions)) throw new Error('bad payload');
+        currentSessions = sessions;
         document.getElementById('session-filters').style.display = 'flex';
         applySessionFilters();
-    } catch (e) { setPanel('sessions-list', emptyState('', 'Error loading sessions')); }
+    } catch (e) {
+        if (seq !== projectRequestSeq) return;
+        setPanel('sessions-list', errorState('Could not load sessions.', function() {
+            selectProject(projectId, opts);
+        }));
+    }
 }

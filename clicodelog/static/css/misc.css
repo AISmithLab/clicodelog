@@ -41,3 +41,114 @@
     font-size: 12px;
     color: var(--text-muted);
 }
+
+/* --- Error state with a retry, instead of a pane that silently stays stale --- */
+.error-state p { color: var(--text-secondary, #888); margin-bottom: 12px; }
+.retry-btn {
+    padding: 6px 14px;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 6px;
+    background: var(--bg-elevated, transparent);
+    color: inherit;
+    cursor: pointer;
+    font-size: 13px;
+}
+.retry-btn:hover { border-color: var(--accent, #888); }
+
+/* --- Session actions: resume / open-in-editor --- */
+.session-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+}
+.action-chip {
+    padding: 4px 10px;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.action-chip:hover { border-color: var(--accent, #888); }
+.action-chip.copied { border-color: #2e9e5b; color: #2e9e5b; }
+.session-cwd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+    color: var(--text-secondary, #888);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+/* --- A source whose files exist but cannot be parsed --- */
+#source-warning {
+    display: none;
+    padding: 8px 14px;
+    background: #fdf0e4;
+    color: #8a4a08;
+    border-bottom: 1px solid #f0d9bf;
+    font-size: 13px;
+}
+@media (prefers-color-scheme: dark) {
+    #source-warning { background: #38240f; color: #f5a25d; border-bottom-color: #4a331a; }
+}
+
+/* --- Search results --- */
+.search-status {
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--text-secondary, #888);
+}
+.search-result-item.active { background: var(--bg-hover, rgba(127,127,127,.12)); }
+.search-snippet {
+    display: flex;
+    gap: 8px;
+    padding: 4px 0 4px 10px;
+    margin-top: 4px;
+    border-left: 2px solid var(--border, #ddd);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary, #777);
+}
+.search-snippet:hover { border-left-color: var(--accent, #888); }
+.search-snippet-role {
+    flex: 0 0 auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    opacity: .7;
+}
+.search-snippet mark {
+    background: #ffe08a;
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+@media (prefers-color-scheme: dark) {
+    .search-snippet mark { background: #6b5410; color: #ffe9a8; }
+}
+
+/* --- Stats view --- */
+.stats-tabs { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border-color, #ddd); flex-wrap: wrap; }
+.stats-tab {
+    padding: 4px 10px; border: 1px solid var(--border-color, #ccc); border-radius: 6px;
+    background: transparent; color: inherit; cursor: pointer; font-size: 12px;
+}
+.stats-tab.active { background: var(--bg-hover, rgba(127,127,127,.15)); font-weight: 600; }
+.stats-summary { display: flex; gap: 1px; flex-wrap: wrap; padding: 12px 14px 4px; }
+.stat-tile { flex: 1 1 110px; padding: 8px 10px; }
+.stat-n { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-l { font-size: 11px; color: var(--text-secondary, #888); margin-top: 2px; }
+.stats-rows { padding: 8px 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.stats-row { display: grid; grid-template-columns: minmax(90px, 26%) 1fr minmax(90px, auto); gap: 10px; align-items: center; font-size: 12.5px; }
+.stats-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary, #777); }
+.stats-bar { background: rgba(127,127,127,.15); border-radius: 3px; height: 12px; overflow: hidden; }
+.stats-bar span { display: block; height: 100%; background: #256abf; border-radius: 3px; }
+@media (prefers-color-scheme: dark) { .stats-bar span { background: #3987e5; } }
+.stats-value { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary, #888); }

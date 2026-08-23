@@ -52,14 +52,30 @@ function renderSessions(sessions) {
     var container = document.getElementById('sessions-list');
     container.textContent = '';
     if (sessions.length === 0) { container.appendChild(emptyState('', 'No sessions found')); return; }
+    var frag = document.createDocumentFragment();
     sessions.forEach(function(session) {
-        container.appendChild(buildSessionItem(session, false));
+        frag.appendChild(buildSessionItem(session, false));
     });
+    container.appendChild(frag);
+}
+
+// Selection used to call applySessionFilters(), rebuilding every node in a
+// list that can hold 10,000+ sessions purely to move one CSS class — and
+// destroying any expanded subagent panels on the way.
+function markActiveSession(sessionId) {
+    var container = document.getElementById('sessions-list');
+    if (!container) return;
+    container.querySelectorAll('.list-item.active').forEach(function(el) {
+        el.classList.remove('active');
+    });
+    var next = container.querySelector('.list-item[data-session-id="' + CSS.escape(sessionId) + '"]');
+    if (next) next.classList.add('active');
 }
 
 function buildSessionItem(session, isSubagent) {
     var item = document.createElement('div');
     item.className = 'list-item' + (session.id === currentSessionId ? ' active' : '') + (isSubagent ? ' subagent-item' : '');
+    item.dataset.sessionId = session.id;
     item.onclick = function() { selectSession(session.id); };
 
     var title = document.createElement('div');
@@ -67,22 +83,30 @@ function buildSessionItem(session, isSubagent) {
     if (isSubagent) {
         var arrow = document.createElement('span');
         arrow.className = 'subagent-arrow';
-        arrow.textContent = '\u21B3 ';
+        arrow.textContent = '↳ ';
         title.appendChild(arrow);
     }
     title.appendChild(document.createTextNode(session.summary));
 
     var meta = document.createElement('div');
     meta.className = 'list-item-meta';
-    meta.textContent = session.message_count + ' msgs \u2022 ' + formatSize(session.size);
-    var br = document.createElement('br');
-    meta.appendChild(br);
+    meta.textContent = session.message_count + ' msgs • ' + formatSize(session.size);
+    var tokens = totalTokens(session.usage && session.usage.input !== undefined
+        ? {
+            input_tokens: session.usage.input,
+            output_tokens: session.usage.output,
+            cache_read_input_tokens: session.usage.cache_read,
+            cache_creation_input_tokens: session.usage.cache_creation,
+        }
+        : session.usage);
+    if (tokens) meta.textContent += ' • ' + formatTokens(tokens) + ' tok';
+    meta.appendChild(document.createElement('br'));
     meta.appendChild(document.createTextNode(formatTime(session.last_timestamp)));
 
     if (!isSubagent && session.subagent_count > 0) {
         var badge = document.createElement('span');
         badge.className = 'subagent-badge';
-        badge.textContent = '\u26A1 ' + session.subagent_count + ' sub';
+        badge.textContent = '⚡ ' + session.subagent_count + ' sub';
         badge.title = 'Expand sub-agents';
         badge.onclick = function(e) {
             e.stopPropagation();
@@ -105,25 +129,83 @@ async function toggleSubagents(sessionId, parentItem) {
     wrapper.appendChild(loadingSpinner('Loading sub-agents...'));
     parentItem.insertAdjacentElement('afterend', wrapper);
     try {
-        var subs = await fetch('/api/projects/' + currentProjectId + '/sessions/' + sessionId + '/subagents?source=' + currentSource).then(function(r) { return r.json(); });
+        var r = await fetch('/api/projects/' + encodeURIComponent(currentProjectId) +
+            '/sessions/' + encodeURIComponent(sessionId) +
+            '/subagents?source=' + encodeURIComponent(currentSource));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var subs = await r.json();
         wrapper.textContent = '';
-        if (subs.length === 0) { wrapper.appendChild(emptyState('', 'No sub-agents found')); return; }
+        if (!subs.length) { wrapper.appendChild(emptyState('', 'No sub-agents found')); return; }
         subs.forEach(function(s) { wrapper.appendChild(buildSessionItem(s, true)); });
-    } catch (e) { wrapper.textContent = 'Error loading sub-agents'; }
+    } catch (e) {
+        wrapper.textContent = '';
+        wrapper.appendChild(emptyState('', 'Could not load sub-agents'));
+    }
 }
 
-async function selectSession(sessionId) {
+async function selectSession(sessionId, opts) {
+    opts = opts || {};
     currentSessionId = sessionId;
-    applySessionFilters();
-    var cacheKey = currentProjectId + ':' + sessionId;
-    if (conversationCache[cacheKey]) {
-        renderConversation(conversationCache[cacheKey]);
+    markActiveSession(sessionId);
+    if (!suppressRouting && typeof pushRoute === 'function') pushRoute();
+
+    var key = cacheKeyFor(currentSource, currentProjectId, sessionId);
+    var cached = cacheGet(key);
+    if (cached) {
+        try {
+            renderConversation(cached);
+            if (opts.anchor) jumpToAnchor(opts.anchor);
+        } catch (e) {
+            // The cache-hit path used to sit outside try/catch, so a bad entry
+            // threw uncaught and the pane stayed stale forever.
+            console.error('Render failed from cache:', e);
+            conversationCache.delete(key);
+            setPanel('conversation-content', errorState('Could not render this conversation.',
+                function() { selectSession(sessionId, opts); }));
+        }
         return;
     }
+
+    var seq = ++sessionRequestSeq;
     setPanel('conversation-content', loadingSpinner('Loading conversation...'));
+
     try {
-        var conv = await fetch('/api/projects/' + currentProjectId + '/sessions/' + sessionId + '?source=' + currentSource).then(function(r) { return r.json(); });
-        conversationCache[cacheKey] = conv;
+        var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
+            '/sessions/' + encodeURIComponent(sessionId) +
+            '?source=' + encodeURIComponent(currentSource);
+        var r = await fetch(url);
+
+        // Click a big session, then a small one: the big response can land last
+        // and replace the pane while the list shows the other as selected.
+        if (seq !== sessionRequestSeq) return;
+
+        var conv = null;
+        try { conv = await r.json(); } catch (e) { conv = null; }
+        if (seq !== sessionRequestSeq) return;
+
+        if (!r.ok || !conv || conv.error || !Array.isArray(conv.messages)) {
+            var msg = (conv && conv.error) || ('Could not load this conversation (HTTP ' + r.status + ')');
+            setPanel('conversation-content', errorState(msg, function() {
+                selectSession(sessionId, opts);
+            }));
+            return;                       // deliberately NOT cached
+        }
+
+        cachePut(key, conv);
         renderConversation(conv);
-    } catch (e) { setPanel('conversation-content', emptyState('', 'Error loading conversation')); }
+        if (opts.anchor) jumpToAnchor(opts.anchor);
+    } catch (e) {
+        if (seq !== sessionRequestSeq) return;
+        setPanel('conversation-content', errorState('Could not load this conversation.',
+            function() { selectSession(sessionId, opts); }));
+    }
+}
+
+function jumpToAnchor(uuid) {
+    if (!uuid) return;
+    if (typeof loadAllMessages === 'function') {
+        loadAllMessages(function() { scrollToAnchor(uuid); });
+    } else {
+        scrollToAnchor(uuid);
+    }
 }

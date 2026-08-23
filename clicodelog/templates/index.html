@@ -19,6 +19,7 @@
     <link rel="stylesheet" href="/static/css/misc.css">
 </head>
 <body class="hide-tool-boxes">
+    <div id="source-warning" role="status"></div>
     <!-- Top Controls -->
     <div class="top-controls">
         <div class="source-selector">
@@ -54,9 +55,17 @@
             <span class="icon">📥</span>
             <span>Export</span>
         </button>
+        <button class="control-btn" id="export-md-btn" onclick="exportMarkdown()" title="Export Markdown for issues, PRs and notes" disabled>
+            <span class="icon">📝</span>
+            <span>MD</span>
+        </button>
         <button class="control-btn" id="export-raw-btn" onclick="exportRawConversation()" title="Export the exact raw source file (everything, nothing omitted)" disabled>
             <span class="icon">🧬</span>
             <span>Raw</span>
+        </button>
+        <button class="control-btn" id="stats-btn" onclick="toggleStats()" title="Token usage by day, project and model">
+            <span class="icon">📊</span>
+            <span>Stats</span>
         </button>
         <button class="control-btn" id="sync-btn" onclick="manualSync()" title="Sync data now">
             <span class="icon">🔄</span>
@@ -80,6 +89,22 @@
         <div class="search-modal-content" id="search-results">
             <div class="no-search-results">Type to search across conversations</div>
         </div>
+        <div class="search-status" id="index-status"></div>
+    </div>
+
+    <!-- Stats -->
+    <div class="search-modal" id="stats-modal">
+        <div class="search-modal-header">
+            <h3>📊 Usage</h3>
+            <span class="search-modal-close" onclick="toggleStats()">✕</span>
+        </div>
+        <div class="stats-tabs">
+            <button class="stats-tab active" data-group="day" onclick="setStatsGroup('day')">By day</button>
+            <button class="stats-tab" data-group="project" onclick="setStatsGroup('project')">By project</button>
+            <button class="stats-tab" data-group="model" onclick="setStatsGroup('model')">By model</button>
+            <button class="stats-tab" data-group="tool" onclick="setStatsGroup('tool')">Tools</button>
+        </div>
+        <div class="search-modal-content" id="stats-body"></div>
     </div>
 
     <div class="bookmarks-panel" id="bookmarks-panel">
@@ -201,11 +226,13 @@
     <script src="/static/js/resize.js"></script>
     <script src="/static/js/tags.js"></script>
     <script src="/static/js/sync.js"></script>
+    <script src="/static/js/router.js"></script>
     <script src="/static/js/projects.js"></script>
     <script src="/static/js/sessions.js"></script>
     <script src="/static/js/conversation.js"></script>
     <script src="/static/js/bookmarks.js"></script>
     <script src="/static/js/search.js"></script>
+    <script src="/static/js/stats.js"></script>
     <script src="/static/js/clipboard.js"></script>
     <script src="/static/js/main.js"></script>
     <script>if (typeof loadBookmarks === 'function') loadBookmarks();</script>

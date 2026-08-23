@@ -1,5 +1,7 @@
+import errno
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -8,7 +10,10 @@ import webbrowser
 import uvicorn
 
 from .config import DATA_DIR, SOURCES, SYNC_INTERVAL
-from .sync import background_sync, sync_data
+from .logging_setup import get_logger, setup_logging
+from .sync import background_sync, initial_sync
+
+log = get_logger(__name__)
 
 BANNER = r"""
    ____ _ _  ____          _      _
@@ -19,33 +24,105 @@ BANNER = r"""
                                               |___/
 """
 
+_OWN_MARKERS = ("clicodelog", "uvicorn")
 
-def kill_process_on_port(port: int, max_retries: int = 3) -> bool:
-    for attempt in range(max_retries):
+
+def _listener_pids(port: int) -> list[int]:
+    """PIDs listening on port — not every process with a socket on it.
+
+    `lsof -ti :{port}` also matches the remote end, so a browser tab holding a
+    keep-alive connection to a previous instance was a match. Restarting could
+    therefore SIGKILL the user's browser.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+    pids = []
+    for line in result.stdout.split():
         try:
-            result = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                for pid in result.stdout.strip().split("\n"):
-                    print(f"⚠️  Port {port} in use by PID {pid} — killing...")
-                    try:
-                        os.kill(int(pid), signal.SIGKILL)
-                    except (ProcessLookupError, Exception):
-                        pass
-                time.sleep(1.5)
-                check = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True)
-                if check.returncode != 0 or not check.stdout.strip():
-                    print(f"✓ Port {port} is now free")
-                    return True
-            else:
-                return True
-        except FileNotFoundError:
-            return True  # lsof not available
-        except Exception as e:
-            print(f"Warning: could not check port: {e}")
+            pids.append(int(line))
+        except ValueError:
+            pass
+    return pids
+
+
+def _describe(pid: int) -> str:
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+
+
+def _port_is_free(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError as e:
+            return e.errno not in (errno.EADDRINUSE, errno.EACCES)
+
+
+def free_port(host: str, port: int) -> bool:
+    """Make the port available, refusing to kill anything that isn't ours."""
+    if _port_is_free(host, port):
+        return True
+
+    pids = _listener_pids(port)
+    if not pids:
+        print(f"\n  Port {port} is in use but the owning process could not be identified.")
+        print(f"  Try a different port:  clicodelog --port {port + 1}")
+        return False
+
+    for pid in pids:
+        cmd = _describe(pid)
+        if not any(m in cmd.lower() for m in _OWN_MARKERS):
+            print(f"\n  Port {port} is held by another program (PID {pid}):")
+            print(f"    {cmd[:120]}")
+            print(f"  Refusing to kill it. Use another port:  clicodelog --port {port + 1}")
             return False
 
-    print(f"❌ Failed to free port {port} after {max_retries} attempts")
+        print(f"  Port {port} held by a previous clicodelog (PID {pid}) — stopping it...")
+        try:
+            os.kill(pid, signal.SIGTERM)          # let it shut down cleanly
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            print(f"  No permission to stop PID {pid}. Use another port.")
+            return False
+
+        for _ in range(30):
+            time.sleep(0.1)
+            if _port_is_free(host, port):
+                return True
+        try:
+            os.kill(pid, signal.SIGKILL)          # only a confirmed stale instance
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    for _ in range(20):
+        if _port_is_free(host, port):
+            return True
+        time.sleep(0.1)
     return False
+
+
+def _warn_if_exposed(host: str) -> None:
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return
+    print("\n" + "!" * 68)
+    print("  WARNING: binding to " + host + " exposes this server beyond your machine.")
+    print("  clicodelog has NO authentication. Anyone who can reach this port can")
+    print("  read every conversation you have had with your AI tools, including any")
+    print("  secrets pasted into them, and can delete your bookmarks.")
+    print("  Use --host 127.0.0.1 (the default) unless you are certain.")
+    print("!" * 68)
+    log.warning("Server bound to non-loopback host %s with no authentication", host)
 
 
 def run_server(
@@ -55,8 +132,10 @@ def run_server(
     debug: bool = False,
     folder: str | None = None,
 ) -> None:
-    from .app import app  # local import avoids circular dependency at module level
+    from .app import app
     from . import sync as _sync
+
+    setup_logging(debug)
 
     print(BANNER)
     print("  AI Conversation History Viewer")
@@ -64,47 +143,36 @@ def run_server(
 
     if folder:
         _sync.folder_filter = folder
-        print(f"\n🔎 Folder filter active: only showing projects matching '{folder}'")
+        print(f"\n  Folder filter active: only showing projects matching '{folder}'")
 
-    if not kill_process_on_port(port):
-        print(f"\n❌ Could not free port {port}. Try: lsof -ti:{port} | xargs kill -9")
+    _warn_if_exposed(host)
+
+    if not free_port(host, port):
         return
 
-    if not skip_sync:
-        print("\nSyncing data from all sources...")
-        for source_id, config in SOURCES.items():
-            print(f"\n{config['name']}:")
-            print(f"  Source: {config['source_dir']}")
-            print(f"  Backup: {DATA_DIR / config['data_subdir']}")
-            if sync_data(source_id=source_id):
-                print("  ✓ Sync completed!")
-            else:
-                print("  ⚠ Could not sync — using existing local data if available.")
+    for source_id, config in SOURCES.items():
+        print(f"  {config['name']:<14} {DATA_DIR / config['data_subdir']}")
+
+    # Sync and index in the background so the UI is available immediately. The
+    # data directory already holds the previous run's copy, which is exactly what
+    # --no-sync has always relied on.
+    if skip_sync:
+        print("\n  Skipping initial sync (--no-sync)")
     else:
-        print("\nSkipping initial sync (--no-sync)")
-
-    print(f"\nBackground sync: every {SYNC_INTERVAL // 3600} hour(s)")
+        print(f"\n  Syncing in the background; refreshes every {SYNC_INTERVAL // 3600}h")
+    threading.Thread(target=initial_sync, args=(skip_sync,), daemon=True).start()
     threading.Thread(target=background_sync, daemon=True).start()
-    print("Background sync thread started.")
-
-    # Build/refresh the search index in the background so the first search is
-    # instant. Incremental — only changed files are re-read on later runs.
-    def _build_index():
-        try:
-            from .search_index import refresh_index
-            refresh_index()
-        except Exception as e:
-            print(f"(search index build skipped: {e})")
-
-    threading.Thread(target=_build_index, daemon=True).start()
 
     url = f"http://{host}:{port}"
-    print(f"\nStarting server...")
-    print(f"🌐 Opening {url} in your browser...")
+    print(f"\n  Ready at {url}")
     print("=" * 60)
 
     def _open_browser():
-        time.sleep(1.5)
+        # Poll the port instead of guessing with a fixed sleep.
+        for _ in range(100):
+            if not _port_is_free(host, port):
+                break
+            time.sleep(0.1)
         try:
             webbrowser.open(url)
         except Exception:

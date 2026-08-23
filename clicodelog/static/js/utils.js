@@ -51,3 +51,39 @@ function loadingSpinner(label) {
     div.appendChild(document.createTextNode(label));
     return div;
 }
+
+// A failure the user can act on, instead of a pane that silently stays stale.
+function errorState(message, onRetry) {
+    const div = document.createElement('div');
+    div.className = 'empty-state error-state';
+    const p = document.createElement('p');
+    p.textContent = message;
+    div.appendChild(p);
+    if (typeof onRetry === 'function') {
+        const btn = document.createElement('button');
+        btn.className = 'retry-btn';
+        btn.textContent = 'Try again';
+        btn.onclick = onRetry;
+        div.appendChild(btn);
+    }
+    return div;
+}
+
+// Copy helper shared by the resume-command and open-in-editor buttons.
+async function copyToClipboard(text, btn, doneLabel) {
+    try {
+        await navigator.clipboard.writeText(text);
+        if (btn) {
+            const orig = btn.textContent;
+            btn.textContent = doneLabel || 'Copied';
+            btn.classList.add('copied');
+            setTimeout(function() {
+                btn.textContent = orig;
+                btn.classList.remove('copied');
+            }, 1800);
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+}

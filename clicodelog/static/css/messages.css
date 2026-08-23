@@ -11,9 +11,13 @@
     contain-intrinsic-size: auto 120px;
 }
 
-.messages.filter-user .message.assistant { display: none; }
-.messages.filter-assistant .message.user { display: none; }
-.messages.filter-tools .message:not(.has-tools) { display: none; }
+/* Role filtering is done with container classes so a filter change is one class
+   flip rather than an inline style written to every message node. When
+   .filtering is on, everything is hidden and each enabled role opts back in. */
+.messages.filtering .message { display: none; }
+.messages.filtering.show-user .message.user { display: block; }
+.messages.filtering.show-assistant .message.assistant { display: block; }
+.messages.filtering.show-tools .message.has-tools { display: block; }
 
 /* Hide-tools toggle: hide the yellow tool boxes, and fully collapse any
    message that is nothing but tool boxes (no text content). */

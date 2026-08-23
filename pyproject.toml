@@ -27,32 +27,36 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Web Environment",
-    "Framework :: Flask",
+    "Framework :: FastAPI",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Documentation",
     "Topic :: Utilities",
 ]
 
 dependencies = [
     "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
+    # Plain uvicorn, not [standard]: uvloop/watchfiles/httptools/websockets are
+    # all dead weight for a single-user server on loopback.
+    "uvicorn>=0.24.0",
     "jinja2>=3.1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "httpx",
     "build",
     "twine",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [project.urls]
 Homepage = "https://github.com/monk1337/clicodelog"
@@ -67,4 +71,12 @@ where = ["."]
 include = ["clicodelog*"]
 
 [tool.setuptools.package-data]
-clicodelog = ["templates/*.html", "static/css/*.css", "static/js/*.js"]
+# The vendor glob is load-bearing: "static/js/*.js" does not recurse, so every
+# published wheel shipped without marked/DOMPurify/highlight.js and silently
+# degraded to unrendered plain text. tests/test_packaging.py guards this.
+clicodelog = [
+    "templates/*.html",
+    "static/css/*.css",
+    "static/js/*.js",
+    "static/js/vendor/*.js",
+]
