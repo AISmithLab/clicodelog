@@ -1,57 +1,57 @@
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from . import __version__
 from .config import PACKAGE_DIR
 from .routes import router
 
-app = FastAPI(title="CLI Code Log", version="0.2.2")
+app = FastAPI(title="CLI Code Log", version=__version__)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# There is deliberately no CORSMiddleware here. The SPA is served from this same
+# origin and never needed it, while `allow_origins=["*"]` with
+# `allow_credentials=True` made Starlette reflect any requesting page's Origin —
+# so any website open in the browser could read every transcript from
+# 127.0.0.1:6126 and delete bookmarks through it.
 
 
 @app.middleware("http")
-async def no_cache_static(request: Request, call_next):
-    # Local dev tool: never let the browser cache JS/CSS/templates, so UI
-    # changes show up on a normal refresh instead of needing a hard reload.
+async def cache_policy(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path
-    if path.startswith("/static") or path in ("/", "/view"):
-        response.headers["Cache-Control"] = "no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
+    if path.startswith("/static/js/vendor/"):
+        # Vendored libraries are immutable for a given release.
+        response.headers["Cache-Control"] = "public, max-age=604800"
+    elif path.startswith("/static") or path in ("/", "/view"):
+        # `no-cache` still revalidates on every load, preserving the
+        # edit-and-refresh loop, but allows a 304 instead of a full re-download.
+        response.headers["Cache-Control"] = "no-cache"
     return response
+
 
 app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
 
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
 
+def _render(request: Request, name: str):
+    # FastAPI/Starlette changed TemplateResponse to accept `request` first.
+    # Support both call styles so fresh installs and older environments work.
+    try:
+        return templates.TemplateResponse(request=request, name=name)
+    except TypeError:
+        return templates.TemplateResponse(name, {"request": request})
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    # FastAPI/Starlette changed TemplateResponse to accept `request` first.
-    # Support both the current and older call styles so fresh installs and
-    # older environments render the index page correctly.
-    try:
-        return templates.TemplateResponse(request=request, name="index.html")
-    except TypeError:
-        return templates.TemplateResponse("index.html", {"request": request})
+    return _render(request, "index.html")
 
 
 @app.get("/view", response_class=HTMLResponse)
 async def view(request: Request):
-    try:
-        return templates.TemplateResponse(request=request, name="view.html")
-    except TypeError:
-        return templates.TemplateResponse("view.html", {"request": request})
+    return _render(request, "view.html")
 
 
 app.include_router(router)

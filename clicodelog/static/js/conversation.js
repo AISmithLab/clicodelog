@@ -1,14 +1,72 @@
+// One class on the container instead of an inline style written to every one of
+// potentially thousands of message nodes on each filter change and batch append.
 function applyRoleFilter() {
     var mc = document.getElementById('messages-container');
     if (!mc) return;
     var empty = activeFilters.size === 0;
-    mc.querySelectorAll('.message').forEach(function(el) {
-        if (empty) { el.style.display = ''; return; }
-        var show = (activeFilters.has('user') && el.classList.contains('user')) ||
-                   (activeFilters.has('assistant') && el.classList.contains('assistant')) ||
-                   (activeFilters.has('tools') && el.classList.contains('has-tools'));
-        el.style.display = show ? '' : 'none';
-    });
+    mc.classList.toggle('filtering', !empty);
+    mc.classList.toggle('show-user', activeFilters.has('user'));
+    mc.classList.toggle('show-assistant', activeFilters.has('assistant'));
+    mc.classList.toggle('show-tools', activeFilters.has('tools'));
+}
+
+// The session's own working directory makes the CLI reachable again: after
+// finding an old session the next thing you want is to continue it.
+function resumeCommand(conv) {
+    var cwd = (conv && conv.meta && conv.meta.cwd) || sessionCwd();
+    var id = currentSessionId;
+    if (!id) return null;
+    if (currentSource === 'claude-code') {
+        return (cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '') + 'claude --resume ' + id;
+    }
+    if (currentSource === 'codex') {
+        return (cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '') + 'codex resume ' + id;
+    }
+    return null;   // Gemini CLI has no id-based resume
+}
+
+function sessionCwd() {
+    var s = (currentSessions || []).find(function(x) { return x.id === currentSessionId; });
+    if (s && s.cwd) return s.cwd;
+    var p = (projects || []).find(function(x) { return x.id === currentProjectId; });
+    return (p && p.cwd) || '';
+}
+
+function shellQuote(s) {
+    return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+function buildSessionActions(conv) {
+    var row = document.createElement('div');
+    row.className = 'session-actions';
+
+    var cmd = resumeCommand(conv);
+    if (cmd) {
+        var resume = document.createElement('button');
+        resume.className = 'action-chip';
+        resume.textContent = 'Copy resume command';
+        resume.title = cmd;
+        resume.onclick = function() { copyToClipboard(cmd, resume, 'Copied'); };
+        row.appendChild(resume);
+    }
+
+    var cwd = (conv && conv.meta && conv.meta.cwd) || sessionCwd();
+    if (cwd) {
+        var open = document.createElement('button');
+        open.className = 'action-chip';
+        open.textContent = 'Copy editor command';
+        var editor = localStorage.getItem('clicodelog-editor') || 'code';
+        var openCmd = editor + ' ' + shellQuote(cwd);
+        open.title = openCmd;
+        open.onclick = function() { copyToClipboard(openCmd, open, 'Copied'); };
+        row.appendChild(open);
+
+        var path = document.createElement('span');
+        path.className = 'session-cwd';
+        path.textContent = cwd;
+        row.appendChild(path);
+    }
+    return row;
 }
 
 function toggleRoleFilter(filter) {
@@ -66,11 +124,42 @@ function renderMarkdownInto(el, text) {
     }
     var html = marked.parse(text, { gfm: true, breaks: true, mangle: false, headerIds: false });
     el.innerHTML = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-    if (typeof hljs !== 'undefined') {
-        el.querySelectorAll('pre code').forEach(function(block) {
-            try { hljs.highlightElement(block); } catch (e) {}
-        });
+    // Highlighting is deferred until a block is actually on screen. Running
+    // hljs eagerly on every block — with language auto-detection, its most
+    // expensive path — was minutes of jank on a large session.
+    el.querySelectorAll('pre code').forEach(observeForHighlight);
+}
+
+var MAX_HIGHLIGHT_BYTES = 50000;
+
+function observeForHighlight(block) {
+    if (typeof hljs === 'undefined') return;
+    if (block.textContent.length > MAX_HIGHLIGHT_BYTES) return;   // not worth it
+    if (!highlightObserver) {
+        if (!('IntersectionObserver' in window)) { highlightBlock(block); return; }
+        highlightObserver = new IntersectionObserver(function(entries) {
+            entries.forEach(function(entry) {
+                if (!entry.isIntersecting) return;
+                highlightObserver.unobserve(entry.target);
+                highlightBlock(entry.target);
+            });
+        }, { rootMargin: '400px' });
     }
+    highlightObserver.observe(block);
+}
+
+function highlightBlock(block) {
+    if (block.dataset.highlighted) return;
+    block.dataset.highlighted = '1';
+    try {
+        // Passing the fenced language avoids auto-detection across every grammar.
+        var cls = (block.className || '').match(/language-([\w-]+)/);
+        if (cls && hljs.getLanguage(cls[1])) {
+            block.innerHTML = hljs.highlight(block.textContent, { language: cls[1] }).value;
+        } else {
+            hljs.highlightElement(block);
+        }
+    } catch (e) { /* highlighting is cosmetic; never break rendering */ }
 }
 
 // Chronological (oldest → newest), after date filtering. Used by export so
@@ -97,14 +186,52 @@ function getActiveMessages() {
     return msgs;
 }
 
-function toggleMsgOrder() {
-    msgOrder = (msgOrder === 'newest') ? 'oldest' : 'newest';
+function setMsgOrderLabel() {
     var btn = document.getElementById('msg-order-btn');
     if (btn) {
         var label = btn.querySelector('span:last-child') || btn;
         label.textContent = (msgOrder === 'newest') ? 'Newest first' : 'Oldest first';
     }
+}
+
+function toggleMsgOrder() {
+    msgOrder = (msgOrder === 'newest') ? 'oldest' : 'newest';
+    setMsgOrderLabel();
+    // Only part of a long session is loaded, and the loaded window is now at
+    // the wrong end of it — reversing what we already have would show the
+    // wrong messages. Refetch from the correct end.
+    if (currentConversation && hasMoreOnServer()) {
+        reloadConversationWindow();
+        return;
+    }
     rerenderCurrentConversation();
+}
+
+// Refetch the window at whichever end the current order needs.
+async function reloadConversationWindow() {
+    if (!currentProjectId || !currentSessionId) return;
+    var seq = ++sessionRequestSeq;
+    var container = document.getElementById('conversation-content');
+    if (container) setPanel('conversation-content', loadingSpinner('Loading…'));
+    try {
+        var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
+            '/sessions/' + encodeURIComponent(currentSessionId) +
+            '?source=' + encodeURIComponent(currentSource) +
+            '&limit=' + CONV_PAGE +
+            (msgOrder === 'newest' ? '&tail=true' : '&offset=0');
+        var r = await fetch(url);
+        if (seq !== sessionRequestSeq) return;
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var conv = await r.json();
+        if (seq !== sessionRequestSeq) return;
+        if (!conv || conv.error || !Array.isArray(conv.messages)) throw new Error('bad payload');
+        cachePut(cacheKeyFor(currentSource, currentProjectId, currentSessionId), conv);
+        renderConversation(conv);
+    } catch (e) {
+        if (seq !== sessionRequestSeq) return;
+        setPanel('conversation-content',
+            errorState('Could not reload this conversation.', reloadConversationWindow));
+    }
 }
 
 function updateFilterStatus() {
@@ -235,41 +362,104 @@ function loadAllMessages(onComplete) {
 
 // --- In-conversation find: searches the whole conversation, loading every
 // --- message first so matches outside the lazy window are still found.
+// Searching the model, not the DOM: matches are found without rendering
+// anything, so a find no longer forces a full materialisation of every message.
+function messageText(msg) {
+    var parts = [];
+    if (msg.content) parts.push(msg.content);
+    if (msg.thinking) parts.push(msg.thinking);
+    (msg.tool_uses || []).forEach(function(t) {
+        if (t.name) parts.push(t.name);
+        if (t.input) {
+            parts.push(typeof t.input === 'object' ? JSON.stringify(t.input) : String(t.input));
+        }
+    });
+    return parts.join('\n').toLowerCase();
+}
+
 function runConvSearch() {
     var input = document.getElementById('conv-search-input');
     convSearchQuery = (input ? input.value : '').trim().toLowerCase();
     if (!convSearchQuery) { clearConvSearch(); return; }
-    var status = document.getElementById('conv-search-status');
-    if (status) status.textContent = 'Searching…';
-    loadAllMessages(function() { applyConvSearch(); });
+
+    var msgs = getActiveMessages();
+    convSearchMatches = [];
+    for (var i = 0; i < msgs.length; i++) {
+        if (messageText(msgs[i]).indexOf(convSearchQuery) !== -1) convSearchMatches.push(i);
+    }
+    convSearchIndex = -1;
+    updateConvSearchStatus();
+
+    if (!convSearchMatches.length) { markRenderedMatches(); return; }
+    // Render only as far as the first match instead of the whole conversation.
+    ensureRendered(convSearchMatches[0], function() {
+        markRenderedMatches();
+        gotoConvMatch(0);
+    });
 }
 
-function applyConvSearch() {
-    convSearchMatches = [];
-    convSearchIndex = -1;
+// Render forward until index `target` exists in the DOM.
+function ensureRendered(target, done) {
+    var messagesDiv = document.getElementById('messages-container');
+    if (!messagesDiv) { if (done) done(); return; }
+    if (lazyOffset > target) { if (done) done(); return; }
+    var msgs = getActiveMessages();
+    function step() {
+        var end = Math.min(lazyOffset + 50, msgs.length);
+        for (var i = lazyOffset; i < end; i++) {
+            messagesDiv.appendChild(buildMessageEl(msgs[i], i));
+        }
+        lazyOffset = end;
+        if (lazyOffset <= target && lazyOffset < msgs.length) setTimeout(step, 0);
+        else {
+            applyRoleFilter();
+            var sentinel = document.getElementById('lazy-sentinel');
+            if (sentinel) {
+                var remaining = msgs.length - lazyOffset;
+                sentinel.style.display = remaining > 0 ? '' : 'none';
+                sentinel.textContent = remaining > 0 ? (remaining + ' more…') : '';
+            }
+            if (done) done();
+        }
+    }
+    step();
+}
+
+function markRenderedMatches() {
     var mc = document.getElementById('messages-container');
     if (!mc) return;
+    var hits = {};
+    convSearchMatches.forEach(function(i) { hits[i] = true; });
     mc.querySelectorAll('.message').forEach(function(el) {
         el.classList.remove('search-match', 'search-current');
-        if (convSearchQuery && el.textContent.toLowerCase().indexOf(convSearchQuery) !== -1) {
-            el.classList.add('search-match');
-            convSearchMatches.push(el);
-        }
+        if (hits[Number(el.dataset.index)]) el.classList.add('search-match');
     });
-    updateConvSearchStatus();
-    if (convSearchMatches.length) gotoConvMatch(0);
 }
 
+function messageElAt(index) {
+    var mc = document.getElementById('messages-container');
+    return mc ? mc.querySelector('.message[data-index="' + index + '"]') : null;
+}
+
+// convSearchMatches holds message indexes now, not DOM nodes, so a match beyond
+// the rendered window is still navigable — we render up to it on demand.
 function gotoConvMatch(i) {
     if (!convSearchMatches.length) return;
-    if (convSearchIndex >= 0 && convSearchMatches[convSearchIndex]) {
-        convSearchMatches[convSearchIndex].classList.remove('search-current');
-    }
+    var prev = messageElAt(convSearchMatches[convSearchIndex]);
+    if (prev) prev.classList.remove('search-current');
+
     convSearchIndex = (i % convSearchMatches.length + convSearchMatches.length) % convSearchMatches.length;
-    var el = convSearchMatches[convSearchIndex];
-    el.classList.add('search-current');
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    updateConvSearchStatus();
+    var target = convSearchMatches[convSearchIndex];
+
+    ensureRendered(target, function() {
+        markRenderedMatches();
+        var el = messageElAt(target);
+        if (el) {
+            el.classList.add('search-current');
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+        updateConvSearchStatus();
+    });
 }
 
 function convSearchNext() {
@@ -345,6 +535,7 @@ function buildMessageEl(msg, msgIndex) {
 
     var anchor = bookmarkAnchor(msg, msgIndex);
     msgDiv.setAttribute('data-anchor', anchor);
+    msgDiv.dataset.index = String(msgIndex);   // lets find/outline target it
 
     var msgHeader = document.createElement('div');
     msgHeader.className = 'message-header';
@@ -394,8 +585,11 @@ function buildMessageEl(msg, msgIndex) {
     if (msg.usage) {
         var usage = document.createElement('span');
         usage.className = 'usage-info';
-        var toks = (msg.usage.input_tokens || 0) + (msg.usage.output_tokens || 0);
+        // All four fields. Counting only input+output ignored cache reads,
+        // which with prompt caching are nearly all of the real usage.
+        var toks = totalTokens(msg.usage);
         usage.textContent = formatTokens(toks) + ' tok';
+        usage.title = tokenBreakdown(msg.usage);
         msgHeader.appendChild(usage);
     }
     msgDiv.appendChild(msgHeader);
@@ -457,7 +651,15 @@ function renderNextBatch(messagesDiv) {
 
 function setupLazyObserver(messagesDiv) {
     if (lazyObserver) { lazyObserver.disconnect(); lazyObserver = null; }
-    if (!currentConversation || lazyOffset >= getActiveMessages().length) return;
+    if (!currentConversation) return;
+    if (lazyOffset >= getActiveMessages().length) {
+        // Everything downloaded is on screen. Either pull the next page, or
+        // retire the sentinel — leaving it as-is stranded it on "Loading more…"
+        // after the final page had already arrived.
+        if (hasMoreOnServer()) fetchNextConversationPage();
+        else markConversationComplete();
+        return;
+    }
     var sentinel = document.getElementById('lazy-sentinel');
     if (!sentinel) return;
     var scrollRoot = document.getElementById('conversation-content');
@@ -470,6 +672,13 @@ function setupLazyObserver(messagesDiv) {
         renderNextBatch(messagesDiv);
         var remaining = getActiveMessages().length - lazyOffset;
         if (remaining <= 0) {
+            // Rendered everything downloaded so far \u2014 pull the next page if the
+            // server still has more of this session.
+            if (hasMoreOnServer()) {
+                sentinel.textContent = 'Loading more\u2026';
+                fetchNextConversationPage();
+                return;
+            }
             lazyObserver.disconnect(); lazyObserver = null;
             sentinel.style.display = 'none';
         } else {
@@ -479,11 +688,91 @@ function setupLazyObserver(messagesDiv) {
     lazyObserver.observe(sentinel);
 }
 
-function renderConversation(conv) {
-    // Strip empty user protocol messages (tool-result acknowledgments with no content)
-    conv.messages = conv.messages.filter(function(m) {
+function hasMoreOnServer() {
+    if (!currentConversation || currentConversation.total_messages == null) return false;
+    // Newest-first walks backwards, so "more" means earlier messages.
+    return msgOrder === 'newest'
+        ? convWindowStart > 0
+        : convWindowEnd < currentConversation.total_messages;
+}
+
+// Conversations arrive a page at a time so the server never has to parse a
+// whole 966 MB session to show the top of it.
+// Retire the sentinel once the whole session is loaded, so it never sits on
+// "Loading more…" with nothing coming.
+function markConversationComplete() {
+    var sentinel = document.getElementById('lazy-sentinel');
+    if (sentinel) {
+        sentinel.style.display = 'none';
+        sentinel.textContent = '';
+    }
+    if (lazyObserver) { lazyObserver.disconnect(); lazyObserver = null; }
+}
+
+async function fetchNextConversationPage() {
+    if (convFetchInFlight) return;
+    if (!hasMoreOnServer()) { markConversationComplete(); return; }
+    convFetchInFlight = true;
+    var seq = sessionRequestSeq;
+    try {
+        // Newest-first reads backwards through the session, so the next page
+        // is the one BEFORE the current window, not after it.
+        var back = msgOrder === 'newest';
+        var nextOffset = back ? Math.max(0, convWindowStart - CONV_PAGE) : convWindowEnd;
+        var wanted = back
+            ? convWindowStart - nextOffset
+            : Math.min(CONV_PAGE, currentConversation.total_messages - convWindowEnd);
+        if (wanted <= 0) { markConversationComplete(); return; }
+
+        var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
+            '/sessions/' + encodeURIComponent(currentSessionId) +
+            '?source=' + encodeURIComponent(currentSource) +
+            '&limit=' + wanted + '&offset=' + nextOffset;
+        var r = await fetch(url);
+        if (seq !== sessionRequestSeq) return;      // switched session mid-flight
+        if (!r.ok) return;
+        var page = await r.json();
+        if (seq !== sessionRequestSeq) return;
+        if (!page || !Array.isArray(page.messages) || !page.messages.length) return;
+
+        var rawLen = page.messages.length;
+        var clean = stripProtocolMessages(page.messages);
+        if (back) {
+            currentConversation.messages = clean.concat(currentConversation.messages);
+            convWindowStart = page.offset;
+        } else {
+            currentConversation.messages = currentConversation.messages.concat(clean);
+            convWindowEnd = page.offset + rawLen;
+        }
+        currentConversation.total_messages = page.total_messages;
+
+        var messagesDiv = document.getElementById('messages-container');
+        if (messagesDiv) {
+            renderNextBatch(messagesDiv);
+            requestAnimationFrame(function() { setupLazyObserver(messagesDiv); });
+        }
+        updateFilterStatus();
+    } catch (e) {
+        // Leave the sentinel in place; scrolling again retries.
+    } finally {
+        convFetchInFlight = false;
+    }
+}
+
+// Empty user protocol messages (tool-result acknowledgements with no content)
+// are noise in the transcript. Every page goes through this, not just the first.
+function stripProtocolMessages(msgs) {
+    return msgs.filter(function(m) {
         return !(m.role === 'user' && !m.content && !(m.tool_uses && m.tool_uses.length > 0));
     });
+}
+
+function renderConversation(conv) {
+    // Record where this window sits in the session BEFORE filtering shrinks it.
+    convWindowStart = conv.offset || 0;
+    convWindowEnd = convWindowStart + (conv.messages ? conv.messages.length : 0);
+
+    conv.messages = stripProtocolMessages(conv.messages);
     currentConversation = conv;
     lazyOffset = 0;
     if (typeof refreshBookmarkSet === 'function') refreshBookmarkSet();
@@ -514,10 +803,17 @@ function renderConversation(conv) {
     var container = document.getElementById('conversation-content');
     container.textContent = '';
 
-    var totalTokens = conv.messages.reduce(function(acc, m) {
-        if (!m.usage) return acc;
-        return acc + (m.usage.input_tokens || 0) + (m.usage.output_tokens || 0);
+    var sessionTokens = conv.messages.reduce(function(acc, m) {
+        return acc + totalTokens(m.usage);
     }, 0);
+    var sessionBreakdown = conv.messages.reduce(function(acc, m) {
+        if (!m.usage) return acc;
+        acc.input_tokens += m.usage.input_tokens || 0;
+        acc.output_tokens += m.usage.output_tokens || 0;
+        acc.cache_read_input_tokens += m.usage.cache_read_input_tokens || 0;
+        acc.cache_creation_input_tokens += m.usage.cache_creation_input_tokens || 0;
+        return acc;
+    }, { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
 
     var header = document.createElement('div');
     header.className = 'conversation-header';
@@ -528,14 +824,16 @@ function renderConversation(conv) {
     var countSpan = document.createElement('span');
     countSpan.textContent = conv.messages.length + ' messages';
     metaRow.appendChild(countSpan);
-    if (totalTokens > 0) {
+    if (sessionTokens > 0) {
         var tokSpan = document.createElement('span');
         tokSpan.className = 'total-tokens';
-        tokSpan.textContent = formatTokens(totalTokens) + ' tokens';
+        tokSpan.textContent = formatTokens(sessionTokens) + ' tokens';
+        tokSpan.title = tokenBreakdown(sessionBreakdown);
         metaRow.appendChild(tokSpan);
     }
     header.appendChild(h1);
     header.appendChild(metaRow);
+    header.appendChild(buildSessionActions(conv));
     container.appendChild(header);
 
     if (conv.summaries && conv.summaries.length > 0) {

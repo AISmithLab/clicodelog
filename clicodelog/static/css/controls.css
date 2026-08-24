@@ -1,6 +1,11 @@
 .top-controls {
     position: fixed; top: 16px; right: 16px; z-index: 100;
     display: flex; gap: 8px; align-items: center;
+    /* Eleven controls with nowrap and no max-width ran off-screen below about
+       1184px, taking the source selector with them. */
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: calc(100vw - 32px);
 }
 
 .control-btn {
