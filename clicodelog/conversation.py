@@ -118,7 +118,7 @@ def _strip_tool_results(messages: list) -> None:
 
 def get_conversation(project_id: str, session_id: str, source_id: str,
                      *, offset: int = 0, limit: int | None = None,
-                     include_results: bool = False) -> dict:
+                     include_results: bool = False, tail: bool = False) -> dict:
     if source_id not in SOURCES:
         return {"error": "Unknown source"}
     if not (is_safe_id(project_id) and is_safe_id(session_id)):
@@ -139,8 +139,8 @@ def get_conversation(project_id: str, session_id: str, source_id: str,
     if (source_id == "claude-code" and not include_results and limit is not None):
         try:
             from .window import read_window
-            messages, total, summaries = read_window(
-                session_file, st.st_size, st.st_mtime, max(0, offset), limit)
+            messages, total, summaries, start = read_window(
+                session_file, st.st_size, st.st_mtime, max(0, offset), limit, tail)
             _strip_tool_results(messages)
             return {
                 "summaries": summaries,
@@ -148,8 +148,8 @@ def get_conversation(project_id: str, session_id: str, source_id: str,
                 "meta": {"cwd": messages[0].get("cwd") if messages else None},
                 "messages": messages,
                 "total_messages": total,
-                "offset": max(0, offset),
-                "truncated": (max(0, offset) + len(messages)) < total,
+                "offset": start,
+                "truncated": (start + len(messages)) < total,
             }
         except OSError:
             log.exception("Windowed read failed for %s; falling back", session_file)
@@ -178,7 +178,7 @@ def get_conversation(project_id: str, session_id: str, source_id: str,
     messages = conv.get("messages") or []
     total = len(messages)
     if limit is not None:
-        start = max(0, offset)
+        start = max(0, total - limit) if tail else max(0, offset)
         window = messages[start:start + max(0, limit)]
     else:
         start = 0

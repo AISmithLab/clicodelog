@@ -186,14 +186,52 @@ function getActiveMessages() {
     return msgs;
 }
 
-function toggleMsgOrder() {
-    msgOrder = (msgOrder === 'newest') ? 'oldest' : 'newest';
+function setMsgOrderLabel() {
     var btn = document.getElementById('msg-order-btn');
     if (btn) {
         var label = btn.querySelector('span:last-child') || btn;
         label.textContent = (msgOrder === 'newest') ? 'Newest first' : 'Oldest first';
     }
+}
+
+function toggleMsgOrder() {
+    msgOrder = (msgOrder === 'newest') ? 'oldest' : 'newest';
+    setMsgOrderLabel();
+    // Only part of a long session is loaded, and the loaded window is now at
+    // the wrong end of it — reversing what we already have would show the
+    // wrong messages. Refetch from the correct end.
+    if (currentConversation && hasMoreOnServer()) {
+        reloadConversationWindow();
+        return;
+    }
     rerenderCurrentConversation();
+}
+
+// Refetch the window at whichever end the current order needs.
+async function reloadConversationWindow() {
+    if (!currentProjectId || !currentSessionId) return;
+    var seq = ++sessionRequestSeq;
+    var container = document.getElementById('conversation-content');
+    if (container) setPanel('conversation-content', loadingSpinner('Loading…'));
+    try {
+        var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
+            '/sessions/' + encodeURIComponent(currentSessionId) +
+            '?source=' + encodeURIComponent(currentSource) +
+            '&limit=' + CONV_PAGE +
+            (msgOrder === 'newest' ? '&tail=true' : '&offset=0');
+        var r = await fetch(url);
+        if (seq !== sessionRequestSeq) return;
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var conv = await r.json();
+        if (seq !== sessionRequestSeq) return;
+        if (!conv || conv.error || !Array.isArray(conv.messages)) throw new Error('bad payload');
+        cachePut(cacheKeyFor(currentSource, currentProjectId, currentSessionId), conv);
+        renderConversation(conv);
+    } catch (e) {
+        if (seq !== sessionRequestSeq) return;
+        setPanel('conversation-content',
+            errorState('Could not reload this conversation.', reloadConversationWindow));
+    }
 }
 
 function updateFilterStatus() {
@@ -648,6 +686,15 @@ function hasMoreOnServer() {
         currentConversation.messages.length < currentConversation.total_messages);
 }
 
+// Where the loaded window sits inside the whole session.
+function windowStart() {
+    return (currentConversation && currentConversation.offset) || 0;
+}
+
+function windowEnd() {
+    return windowStart() + ((currentConversation && currentConversation.messages.length) || 0);
+}
+
 // Conversations arrive a page at a time so the server never has to parse a
 // whole 966 MB session to show the top of it.
 async function fetchNextConversationPage() {
@@ -655,11 +702,19 @@ async function fetchNextConversationPage() {
     convFetchInFlight = true;
     var seq = sessionRequestSeq;
     try {
+        // Newest-first reads backwards through the session, so the next page
+        // is the one BEFORE the current window, not after it.
+        var back = msgOrder === 'newest';
+        var nextOffset = back
+            ? Math.max(0, windowStart() - CONV_PAGE)
+            : windowEnd();
+        var wanted = back ? Math.min(CONV_PAGE, windowStart()) : CONV_PAGE;
+        if (wanted <= 0) return;
+
         var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
             '/sessions/' + encodeURIComponent(currentSessionId) +
             '?source=' + encodeURIComponent(currentSource) +
-            '&limit=' + CONV_PAGE +
-            '&offset=' + currentConversation.messages.length;
+            '&limit=' + wanted + '&offset=' + nextOffset;
         var r = await fetch(url);
         if (seq !== sessionRequestSeq) return;      // switched session mid-flight
         if (!r.ok) return;
@@ -667,7 +722,12 @@ async function fetchNextConversationPage() {
         if (seq !== sessionRequestSeq) return;
         if (!page || !Array.isArray(page.messages) || !page.messages.length) return;
 
-        currentConversation.messages = currentConversation.messages.concat(page.messages);
+        if (back) {
+            currentConversation.messages = page.messages.concat(currentConversation.messages);
+            currentConversation.offset = page.offset;
+        } else {
+            currentConversation.messages = currentConversation.messages.concat(page.messages);
+        }
         currentConversation.total_messages = page.total_messages;
 
         var messagesDiv = document.getElementById('messages-container');

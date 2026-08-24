@@ -94,13 +94,20 @@ def table_for(path: Path, size: int, mtime: float) -> dict:
 
 
 def read_window(path: Path, size: int, mtime: float, offset: int,
-                limit: int | None) -> tuple[list, int, list]:
-    """Return (messages, total, summaries) for one page."""
+                limit: int | None, tail: bool = False) -> tuple[list, int, list, int]:
+    """Return (messages, total, summaries, start) for one page.
+
+    tail=True reads the LAST `limit` messages. The viewer defaults to
+    newest-first, so it needs the end of the conversation, not the beginning.
+    """
     table = table_for(path, size, mtime)
     offsets = table["offsets"]
     total = len(offsets)
 
-    start = max(0, min(offset, total))
+    if tail and limit is not None:
+        start = max(0, total - limit)
+    else:
+        start = max(0, min(offset, total))
     end = total if limit is None else min(start + max(0, limit), total)
 
     messages = []
@@ -124,4 +131,4 @@ def read_window(path: Path, size: int, mtime: float, offset: int,
                 if m:
                     messages.append(m)
 
-    return messages, total, table["summaries"]
+    return messages, total, table["summaries"], start

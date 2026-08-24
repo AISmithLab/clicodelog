@@ -243,3 +243,50 @@ def test_deeply_nested_subagents_stay_reachable(tmp_path, monkeypatch):
         if hasattr(metastore._local, "conn"):
             metastore._local.conn.close()
             del metastore._local.conn
+
+
+def _many_messages(n):
+    rows = [{"type": "summary", "summary": "long session"}]
+    for i in range(n):
+        rows.append({
+            "type": "user",
+            "timestamp": f"2026-08-{(i % 28) + 1:02d}T10:00:00Z",
+            "uuid": f"u{i}",
+            "cwd": "/Users/x/my_app",
+            "message": {"role": "user", "content": f"message {i}"},
+        })
+    return rows
+
+
+def test_newest_first_reads_the_end_of_the_session(tmp_path, monkeypatch):
+    """The viewer defaults to newest-first. Fetching offset 0 and reversing it
+    showed the OLDEST page under a "Newest first" label — on a long session the
+    recent conversation looked like it was simply missing."""
+    root = tmp_path / "data"
+    proj = root / "claude-code" / "-Users-x-my-app"
+    _write_jsonl(proj / "long.jsonl", _many_messages(500))
+
+    monkeypatch.setattr("clicodelog.config.DATA_DIR", root)
+    monkeypatch.setattr("clicodelog.conversation.DATA_DIR", root)
+    from clicodelog import conversation, window
+    conversation.clear_cache()
+    window.clear_cache()
+
+    head = conversation.get_conversation("-Users-x-my-app", "long", "claude-code", limit=10)
+    tail = conversation.get_conversation("-Users-x-my-app", "long", "claude-code",
+                                         limit=10, tail=True)
+
+    assert head["total_messages"] == 500
+    assert head["offset"] == 0
+    assert head["messages"][0]["content"] == "message 0"
+
+    # The tail must be the LAST page, and must report where it starts so the
+    # client can page backwards from there.
+    assert tail["offset"] == 490, "tail must start at total - limit"
+    assert tail["messages"][-1]["content"] == "message 499"
+    assert tail["truncated"] is False
+
+    # Paging backwards from the tail reaches the page before it.
+    prev = conversation.get_conversation("-Users-x-my-app", "long", "claude-code",
+                                         limit=10, offset=480)
+    assert prev["messages"][-1]["content"] == "message 489"

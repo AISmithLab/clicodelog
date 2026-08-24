@@ -66,14 +66,15 @@ def api_conversation(project_id: str, session_id: str,
                      source: Optional[str] = None,
                      offset: int = 0,
                      limit: Optional[int] = None,
-                     include_results: bool = False):
+                     include_results: bool = False,
+                     tail: bool = False):
     if not (is_safe_id(project_id) and is_safe_id(session_id)):
         return JSONResponse({"error": "Invalid id"}, status_code=400)
     if limit is not None:
         limit = max(1, min(limit, MAX_PAGE))
     conv = get_conversation(project_id, session_id, _resolve_source(source),
                             offset=max(0, offset), limit=limit,
-                            include_results=include_results)
+                            include_results=include_results, tail=tail)
     if "error" in conv:
         # Previously returned 200 with an error body, so no client could tell
         # success from failure by status alone.

@@ -190,10 +190,15 @@ async function selectSession(sessionId, opts) {
     try {
         // Ask for a window. Without a limit the server parses the whole file:
         // 604 MB of RSS and a 138 MB response for the largest session here.
+        // Newest-first is the default view, so fetch the END of the session —
+        // fetching offset 0 and reversing it showed the oldest messages under
+        // a "Newest first" label, which on a long session looks like the
+        // recent conversation is missing entirely.
         var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
             '/sessions/' + encodeURIComponent(sessionId) +
             '?source=' + encodeURIComponent(currentSource) +
-            '&limit=' + CONV_PAGE;
+            '&limit=' + CONV_PAGE +
+            (msgOrder === 'newest' ? '&tail=true' : '');
         var r = await fetch(url);
 
         // Click a big session, then a small one: the big response can land last
