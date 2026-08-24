@@ -195,3 +195,51 @@ def test_nothing_is_resident_between_queries(fake_data):
     search_index.refresh_index("claude-code")
     assert not hasattr(metastore, "_index"), "the in-memory index dict is gone"
     assert metastore.count("claude-code") >= 1
+
+
+def test_deeply_nested_subagents_stay_reachable(tmp_path, monkeypatch):
+    """Every session file must be reachable — as a top-level session or as a
+    sub-agent of one.
+
+    Sub-agent transcripts nest more than one level deep:
+        <project>/<session-id>/subagents/agent-x.jsonl
+        <project>/<session-id>/subagents/workflows/wf_.../agent-x.jsonl
+    Keying them by their immediate parent folder recorded "subagents" or a
+    workflow id, which matches no session — so they were filtered out of the
+    session list AND unreachable from the expander. 4,806 real transcripts
+    vanished that way.
+    """
+    root = tmp_path / "data"
+    proj = root / "claude-code" / "-Users-x-my-app"
+    _write_jsonl(proj / "sess-1.jsonl", CLAUDE_LINES)
+    _write_jsonl(proj / "sess-1" / "subagents" / "agent-a.jsonl", CLAUDE_LINES)
+    _write_jsonl(proj / "sess-1" / "subagents" / "workflows" / "wf_abc" / "agent-b.jsonl",
+                 CLAUDE_LINES)
+
+    monkeypatch.setattr("clicodelog.config.DATA_DIR", root)
+    monkeypatch.setattr("clicodelog.metastore.DATA_DIR", root)
+    monkeypatch.setattr("clicodelog.sessions.DATA_DIR", root)
+    monkeypatch.setattr("clicodelog.metastore.DB_FILE", tmp_path / "meta.db")
+    if hasattr(metastore._local, "conn"):
+        metastore._local.conn.close()
+        del metastore._local.conn
+    try:
+        search_index.refresh_index("claude-code")
+
+        page = sessions.get_sessions("-Users-x-my-app", "claude-code")
+        assert len(page["sessions"]) == 1, "only the top-level session belongs in the list"
+        assert page["sessions"][0]["id"] == "sess-1"
+
+        subs = sessions.get_subagent_sessions("-Users-x-my-app", "sess-1", "claude-code")
+        ids = sorted(s["id"] for s in subs)
+        assert ids == ["agent-a", "agent-b"], (
+            f"both nesting depths must hang off their owning session, got {ids}"
+        )
+
+        # Nothing may be stranded: indexed == listed + reachable-as-subagent.
+        total = metastore.count("claude-code")
+        assert total == len(page["sessions"]) + len(subs) == 3
+    finally:
+        if hasattr(metastore._local, "conn"):
+            metastore._local.conn.close()
+            del metastore._local.conn

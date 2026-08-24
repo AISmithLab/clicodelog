@@ -181,7 +181,17 @@ def _row_for(source_id: str, f: Path, project_dir) -> tuple | None:
         # and "-" all into "-" — so the recorded cwd is authoritative.
         project_name = info["cwd"] or project_dir.name.replace("-", "/").lstrip("/")
         if f.parent != project_dir:
-            parent = f.parent.name          # subagent transcript
+            # Sub-agent transcripts nest deeper than one level:
+            #   <project>/<session-id>/subagents/agent-x.jsonl
+            #   <project>/<session-id>/subagents/workflows/wf_.../agent-x.jsonl
+            # Record the owning top-level SESSION, not the immediate folder —
+            # storing f.parent.name gave "subagents" or a workflow id, which
+            # matches no session, so 4,806 transcripts were hidden from the
+            # session list and unreachable from the sub-agent expander.
+            try:
+                parent = f.relative_to(project_dir).parts[0]
+            except ValueError:
+                parent = f.parent.name
     elif source_id == "codex":
         cwd = info["cwd"]
         if not cwd:
