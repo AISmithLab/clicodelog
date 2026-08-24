@@ -24,7 +24,7 @@ All in one local interface. Nothing leaves your machine.
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/Python-3.7+-blue.svg" alt="Python 3.7+" />
+  <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+" />
   <img src="https://img.shields.io/badge/FastAPI-0.104+-00c7b7.svg" alt="FastAPI" />
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License MIT" />
   <a href="http://makeapullrequest.com">
@@ -57,6 +57,65 @@ All in one local interface. Nothing leaves your machine.
 | Light Mode | Dark Mode |
 |------------|-----------|
 | ![Light Mode](screenshots/light.png) | ![Dark Mode](screenshots/dark.png) |
+
+
+---
+
+## ✨ What's New
+
+A big round of performance, search and correctness work. Highlights:
+
+<table>
+<tr>
+<td>🔎</td>
+<td><b>Full-text search inside conversations</b><br>Search what was actually said and done, not just session titles — powered by SQLite FTS5 with ranked results, highlighted snippets, and a click straight to the matching message. Opt-in, and it shows the index size before building.</td>
+</tr>
+<tr>
+<td>⚡</td>
+<td><b>Everything got dramatically faster</b><br>Opening a large project went from <b>15.5s → 0.25s</b>. A search that used to scan the whole corpus for 15.8s now answers in <b>11ms</b>. One slow request no longer freezes the entire app.</td>
+</tr>
+<tr>
+<td>🪶</td>
+<td><b>Loads only what's on screen</b><br>Sessions and messages are fetched on demand instead of all at once, so memory stays around <b>22MB</b> no matter how big your history gets. Opening a 966MB session used to need 604MB of RAM — now it's 68MB.</td>
+</tr>
+<tr>
+<td>📊</td>
+<td><b>Usage analytics</b><br>Token spend by day, project, model and tool. Now counts <b>cache reads and cache writes</b> — the old totals left them out, under-reporting real usage by over 100x.</td>
+</tr>
+<tr>
+<td>🗂️</td>
+<td><b>File-edit archaeology</b><br>"When did an agent last touch <code>auth.py</code>?" Search every session for a file and jump to the exact edit.</td>
+</tr>
+<tr>
+<td>▶️</td>
+<td><b>Jump back into a session</b><br>One click copies <code>cd &lt;project&gt; &amp;&amp; claude --resume &lt;id&gt;</code> so you can pick up where you left off, plus a copy-to-open-in-editor command.</td>
+</tr>
+<tr>
+<td>📝</td>
+<td><b>Markdown export</b><br>Export a conversation as Markdown — fenced code blocks, collapsible thinking and tool calls — ready to paste into an issue or PR.</td>
+</tr>
+<tr>
+<td>♊</td>
+<td><b>Gemini CLI works again</b><br>Gemini changed its log format and the source had gone quietly empty. Fully re-supported — and the app now warns you when a source has files it can't read, instead of just showing nothing.</td>
+</tr>
+<tr>
+<td>🔗</td>
+<td><b>Shareable links and a working back button</b><br>Every project and session has its own URL. Refresh keeps your place, and browser back/forward behave.</td>
+</tr>
+<tr>
+<td>🔒</td>
+<td><b>Security fixes</b><br>Removed a permissive CORS policy that let any website you visited read your local conversation history. Startup no longer force-kills unrelated processes holding the port, and binding to a non-loopback <code>--host</code> now warns loudly.</td>
+</tr>
+<tr>
+<td>🛟</td>
+<td><b>Your data is safer</b><br>Bookmarks and project settings are written atomically with backups, and a corrupt file is quarantined rather than silently reset to empty. Sync never removes a backup before its replacement is safely in place.</td>
+</tr>
+</table>
+
+> **Upgrading from PyPI?** Markdown rendering and syntax highlighting were silently broken
+> in earlier published versions — the packaged wheel was missing its bundled JavaScript.
+> Fixed, and now guarded by a test.
+
 
 
 
@@ -259,15 +318,26 @@ data/
 
 ```
 clicodelog/
-├── app.py              # Flask backend (multi-source support)
-├── run.sh              # Run script
-├── requirements.txt    # Dependencies
-├── data/               # Synced logs (auto-created)
-│   ├── claude-code/
-│   ├── codex/
-│   └── gemini/
-└── templates/
-    └── index.html      # Frontend
+├── cli.py              # Entry point
+├── app.py              # FastAPI app, routes, cache policy
+├── config.py           # SOURCES, paths, constants
+├── sync.py             # Additive clone-backup of each source
+├── scan.py             # One-pass session metadata extraction
+├── metastore.py        # SQLite metadata store (listings, projects)
+├── fts.py              # SQLite FTS5 full-text search
+├── window.py           # Windowed reads of huge sessions
+├── conversation.py     # Conversation loading + pagination
+├── storage.py          # Atomic writes, disk checks
+├── parsers/            # claude.py, codex.py, gemini.py
+├── routes/             # projects, search, export, sync, sources, stats
+├── static/             # Vanilla JS + CSS (no build step)
+└── templates/          # index.html, view.html
+
+~/.clicodelog/          # Created at runtime, never in the repo
+├── data/               # Your synced logs (the durable backup)
+├── meta.db             # Session metadata index
+├── fts.db              # Full-text index (optional)
+└── bookmarks.json      # Your bookmarks
 ```
 
 ---
@@ -279,24 +349,38 @@ clicodelog/
 | `/api/sources` | GET | List available sources |
 | `/api/sources/<id>` | POST | Set active source |
 | `/api/projects?source=` | GET | List projects |
-| `/api/projects/<id>/sessions?source=` | GET | List sessions |
-| `/api/projects/<id>/sessions/<id>?source=` | GET | Fetch session |
+| `/api/projects/<id>/sessions?source=&limit=&offset=` | GET | List sessions (paged) |
+| `/api/projects/<id>/sessions/<id>?source=&limit=&offset=` | GET | Fetch a window of a session |
+| `/api/projects/<id>/sessions/<id>/subagents?source=` | GET | List sub-agent sessions |
+| `/api/projects/<id>/sessions/<id>/export?fmt=txt\|md` | GET | Export as text or Markdown |
+| `/api/projects/<id>/sessions/<id>/export-raw` | GET | Stream the exact source file |
+| `/api/search?q=&source=&project=&role=&after=&before=` | GET | Search titles and message bodies |
+| `/api/search/status?source=` | GET | Full-text index state and size estimate |
+| `/api/search/build?source=&tool_cap=` | POST | Build the full-text index |
+| `/api/stats?source=&group=day\|project\|model\|tool` | GET | Token usage analytics |
+| `/api/files?path=&source=` | GET | Which sessions edited a file |
+| `/api/bookmarks` | GET/POST | List or add bookmarks |
 | `/api/sync?source=` | POST | Trigger sync |
-| `/api/status?source=` | GET | Sync status |
+| `/api/status?source=` | GET | Sync status and free disk |
 
 ---
 
 ## Requirements
 
-- Python 3.7+
-- Flask 2.0+
-- flask-cors
+- Python 3.10+
+- FastAPI
+- Uvicorn
+- Jinja2
+
+That's the whole runtime dependency list. Search, analytics and the metadata
+store all run on the `sqlite3` module in the standard library — no extra
+services, no database to install.
 
 ---
 
 ## Adding New Sources
 
-To add support for another CLI-based AI tool, update `app.py`:
+To add support for another CLI-based AI tool, start with `config.py`:
 
 ```python
 SOURCES = {
@@ -319,7 +403,15 @@ SOURCES = {
 }
 ```
 
-Then implement the corresponding parser for its log format.
+Then wire up the rest:
+
+1. Add a reader branch in `scan.py` (metadata extraction).
+2. Add an entry-shape branch in `metastore._row_for` (how projects are keyed).
+3. Add a parser in `parsers/` and export it from `parsers/__init__.py`.
+4. Add a text extractor to `fts._EXTRACT` so the source is searchable.
+5. Add the source to the parametrised contract test in `tests/test_sources.py` —
+   it asserts a source with files on disk yields at least one session, which is
+   exactly the check that would have caught Gemini going silently empty.
 
 ```
  @misc{clicodelog2026,                                                                                                                                                      
