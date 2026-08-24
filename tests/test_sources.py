@@ -290,3 +290,53 @@ def test_newest_first_reads_the_end_of_the_session(tmp_path, monkeypatch):
     prev = conversation.get_conversation("-Users-x-my-app", "long", "claude-code",
                                          limit=10, offset=480)
     assert prev["messages"][-1]["content"] == "message 489"
+
+
+def test_backward_paging_covers_the_session_exactly(tmp_path, monkeypatch):
+    """The client pages backwards from the tail using `offset` + page length.
+
+    Both must be in RAW message units. The renderer drops empty tool-result
+    acknowledgements, so the displayed count is smaller than the window — using
+    that shrunken number as the paging cursor meant the loaded range never
+    reached the total, and the sentinel sat on "Loading more..." forever.
+    """
+    root = tmp_path / "data"
+    proj = root / "claude-code" / "-Users-x-my-app"
+    rows = [{"type": "summary", "summary": "s"}]
+    for i in range(250):
+        rows.append({"type": "user", "timestamp": "2026-08-01T10:00:00Z", "uuid": f"u{i}",
+                     "message": {"role": "user", "content": f"m{i}"}})
+        # An empty protocol ack — real sessions are full of these, and they are
+        # exactly what the renderer filters out.
+        rows.append({"type": "user", "timestamp": "2026-08-01T10:00:00Z", "uuid": f"t{i}",
+                     "message": {"role": "user", "content": [
+                         {"type": "tool_result", "tool_use_id": f"x{i}", "content": "ok"}]}})
+    _write_jsonl(proj / "long.jsonl", rows)
+
+    monkeypatch.setattr("clicodelog.config.DATA_DIR", root)
+    monkeypatch.setattr("clicodelog.conversation.DATA_DIR", root)
+    from clicodelog import conversation, window
+    conversation.clear_cache()
+    window.clear_cache()
+
+    PAGE = 100
+    first = conversation.get_conversation("-Users-x-my-app", "long", "claude-code",
+                                          limit=PAGE, tail=True)
+    total = first["total_messages"]
+    assert total == 500
+
+    # Walk backwards exactly as the client does, and confirm full coverage
+    # with no gaps and no overlap.
+    start, end = first["offset"], first["offset"] + len(first["messages"])
+    assert end == total
+    guard = 0
+    while start > 0 and guard < 50:
+        guard += 1
+        want = min(PAGE, start)
+        page = conversation.get_conversation("-Users-x-my-app", "long", "claude-code",
+                                             limit=want, offset=start - want)
+        assert page["offset"] == start - want, "server must honour the requested offset"
+        assert len(page["messages"]) == want, "a full page must come back in raw units"
+        start = page["offset"]
+    assert start == 0, "backward paging must reach the beginning"
+    assert end - start == total, "the walk must cover the session exactly once"

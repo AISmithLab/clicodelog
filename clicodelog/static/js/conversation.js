@@ -651,7 +651,15 @@ function renderNextBatch(messagesDiv) {
 
 function setupLazyObserver(messagesDiv) {
     if (lazyObserver) { lazyObserver.disconnect(); lazyObserver = null; }
-    if (!currentConversation || lazyOffset >= getActiveMessages().length) return;
+    if (!currentConversation) return;
+    if (lazyOffset >= getActiveMessages().length) {
+        // Everything downloaded is on screen. Either pull the next page, or
+        // retire the sentinel — leaving it as-is stranded it on "Loading more…"
+        // after the final page had already arrived.
+        if (hasMoreOnServer()) fetchNextConversationPage();
+        else markConversationComplete();
+        return;
+    }
     var sentinel = document.getElementById('lazy-sentinel');
     if (!sentinel) return;
     var scrollRoot = document.getElementById('conversation-content');
@@ -681,35 +689,40 @@ function setupLazyObserver(messagesDiv) {
 }
 
 function hasMoreOnServer() {
-    return !!(currentConversation &&
-        currentConversation.total_messages != null &&
-        currentConversation.messages.length < currentConversation.total_messages);
-}
-
-// Where the loaded window sits inside the whole session.
-function windowStart() {
-    return (currentConversation && currentConversation.offset) || 0;
-}
-
-function windowEnd() {
-    return windowStart() + ((currentConversation && currentConversation.messages.length) || 0);
+    if (!currentConversation || currentConversation.total_messages == null) return false;
+    // Newest-first walks backwards, so "more" means earlier messages.
+    return msgOrder === 'newest'
+        ? convWindowStart > 0
+        : convWindowEnd < currentConversation.total_messages;
 }
 
 // Conversations arrive a page at a time so the server never has to parse a
 // whole 966 MB session to show the top of it.
+// Retire the sentinel once the whole session is loaded, so it never sits on
+// "Loading more…" with nothing coming.
+function markConversationComplete() {
+    var sentinel = document.getElementById('lazy-sentinel');
+    if (sentinel) {
+        sentinel.style.display = 'none';
+        sentinel.textContent = '';
+    }
+    if (lazyObserver) { lazyObserver.disconnect(); lazyObserver = null; }
+}
+
 async function fetchNextConversationPage() {
-    if (convFetchInFlight || !hasMoreOnServer()) return;
+    if (convFetchInFlight) return;
+    if (!hasMoreOnServer()) { markConversationComplete(); return; }
     convFetchInFlight = true;
     var seq = sessionRequestSeq;
     try {
         // Newest-first reads backwards through the session, so the next page
         // is the one BEFORE the current window, not after it.
         var back = msgOrder === 'newest';
-        var nextOffset = back
-            ? Math.max(0, windowStart() - CONV_PAGE)
-            : windowEnd();
-        var wanted = back ? Math.min(CONV_PAGE, windowStart()) : CONV_PAGE;
-        if (wanted <= 0) return;
+        var nextOffset = back ? Math.max(0, convWindowStart - CONV_PAGE) : convWindowEnd;
+        var wanted = back
+            ? convWindowStart - nextOffset
+            : Math.min(CONV_PAGE, currentConversation.total_messages - convWindowEnd);
+        if (wanted <= 0) { markConversationComplete(); return; }
 
         var url = '/api/projects/' + encodeURIComponent(currentProjectId) +
             '/sessions/' + encodeURIComponent(currentSessionId) +
@@ -722,11 +735,14 @@ async function fetchNextConversationPage() {
         if (seq !== sessionRequestSeq) return;
         if (!page || !Array.isArray(page.messages) || !page.messages.length) return;
 
+        var rawLen = page.messages.length;
+        var clean = stripProtocolMessages(page.messages);
         if (back) {
-            currentConversation.messages = page.messages.concat(currentConversation.messages);
-            currentConversation.offset = page.offset;
+            currentConversation.messages = clean.concat(currentConversation.messages);
+            convWindowStart = page.offset;
         } else {
-            currentConversation.messages = currentConversation.messages.concat(page.messages);
+            currentConversation.messages = currentConversation.messages.concat(clean);
+            convWindowEnd = page.offset + rawLen;
         }
         currentConversation.total_messages = page.total_messages;
 
@@ -743,11 +759,20 @@ async function fetchNextConversationPage() {
     }
 }
 
-function renderConversation(conv) {
-    // Strip empty user protocol messages (tool-result acknowledgments with no content)
-    conv.messages = conv.messages.filter(function(m) {
+// Empty user protocol messages (tool-result acknowledgements with no content)
+// are noise in the transcript. Every page goes through this, not just the first.
+function stripProtocolMessages(msgs) {
+    return msgs.filter(function(m) {
         return !(m.role === 'user' && !m.content && !(m.tool_uses && m.tool_uses.length > 0));
     });
+}
+
+function renderConversation(conv) {
+    // Record where this window sits in the session BEFORE filtering shrinks it.
+    convWindowStart = conv.offset || 0;
+    convWindowEnd = convWindowStart + (conv.messages ? conv.messages.length : 0);
+
+    conv.messages = stripProtocolMessages(conv.messages);
     currentConversation = conv;
     lazyOffset = 0;
     if (typeof refreshBookmarkSet === 'function') refreshBookmarkSet();
