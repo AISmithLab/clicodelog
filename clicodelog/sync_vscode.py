@@ -19,8 +19,49 @@ the backup mirrors the source, so the same parser reads either:
 from pathlib import Path
 
 from .editors import safe_name, vscode_user_dirs
+from .logging_setup import get_logger
+from .storage import keep_superseded
+
+log = get_logger(__name__)
 
 EMPTY_WINDOW = "_empty-window"
+
+
+def _request_ids(path: Path) -> set:
+    from .parsers.vscode_log import load_session
+    try:
+        reqs = load_session(path).get("requests") or []
+    except (OSError, ValueError):
+        return set()
+    return {r.get("requestId") for r in reqs if isinstance(r, dict)} - {None}
+
+
+def _copy_chats(src: Path, dest: Path, stats: dict, copy) -> None:
+    """Copy each chat file, never letting a rewrite drop turns from the backup.
+
+    Copilot rewrites a chat file in place: removing or undoing a request, or
+    compacting the .jsonl log. A plain overwrite would lose turns that only
+    the backup still had, so the old copy is kept as a superseded .bak first.
+    """
+    try:
+        files = sorted(f for f in src.iterdir() if f.is_file())
+    except OSError as e:
+        log.warning("Could not list %s: %s", src, e)
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        target = dest / f.name
+        try:
+            changed = target.exists() and (target.stat().st_size, target.stat().st_mtime) \
+                != (f.stat().st_size, f.stat().st_mtime)
+        except OSError:
+            changed = False
+        if changed and f.suffix in (".json", ".jsonl") and _request_ids(target) - _request_ids(f):
+            if keep_superseded(target) is None:
+                stats["failed"] += 1
+                continue
+            log.info("VS Code chat %s lost turns; kept the old copy", f.stem)
+        copy(f, target, stats)
 
 
 def source_roots() -> list[Path]:
@@ -44,12 +85,12 @@ def sync(dest_dir: Path, stats: dict, copy) -> bool:
                 if not chats.is_dir():
                     continue
                 target = dest_dir / (prefix + safe_name(ws.name))
-                copy(chats, target / "chatSessions", stats)
+                _copy_chats(chats, target / "chatSessions", stats, copy)
                 if (ws / "workspace.json").is_file():
                     copy(ws / "workspace.json", target / "workspace.json", stats)
 
         empty = user_dir / "globalStorage" / "emptyWindowChatSessions"
         if empty.is_dir():
             found = True
-            copy(empty, dest_dir / (prefix + EMPTY_WINDOW) / "chatSessions", stats)
+            _copy_chats(empty, dest_dir / (prefix + EMPTY_WINDOW) / "chatSessions", stats, copy)
     return found

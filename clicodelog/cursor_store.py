@@ -18,35 +18,43 @@ log = get_logger(__name__)
 AICHAT_KEY = "workbench.panel.aichat.view.aichat.chatdata"
 
 
+def _is_wal(db: Path) -> bool:
+    """Is the file in WAL mode? Header bytes 18-19 are 2 for WAL, 1 for rollback."""
+    try:
+        with open(db, "rb") as fh:
+            header = fh.read(20)
+    except OSError:
+        return False
+    return len(header) == 20 and header[18] == 2
+
+
 def open_readonly(db: Path) -> sqlite3.Connection | None:
     """Read-only connection that never writes to, or blocks, Cursor's database.
 
-    Even `mode=ro` is not hands-off on a WAL database: it creates `-wal` and
-    `-shm` sidecars when they are missing. So:
-
-    * no `-wal` beside the file — nothing is mid-write (an idle CLI chat, or
-      Cursor not running): open `immutable=1`, which creates nothing and also
-      works when the `-shm` is gone, which plain `mode=ro` cannot.
-    * a `-wal` exists — Cursor is writing: `mode=ro`, which reads the WAL's
-      recent writes (immutable would silently miss them) and only uses the
-      sidecars that are already there.
+    * WAL database with no `-wal` beside it — idle (an inactive CLI chat, or
+      Cursor not running): `immutable=1`. Plain `mode=ro` would create
+      `-wal`/`-shm` sidecars in Cursor's directory, and fails outright when the
+      `-shm` is gone. The main file only changes at a checkpoint, so nothing
+      a new writer appends to its `-wal` can tear this read.
+    * WAL database with a `-wal` — Cursor is writing: `mode=ro`, which reads
+      the WAL's recent writes and only uses sidecars that already exist.
+    * rollback-journal database: `mode=ro`, which takes the shared lock that
+      keeps a concurrent writer from tearing the read, and creates no files.
+      (`immutable=1` here would read with locking off.)
 
     If Cursor holds a lock that refuses us (Windows locks more strictly than
     POSIX), the chat is skipped and the next hourly sync picks it up.
     """
     base = db.resolve().as_uri()
-    live = db.with_name(db.name + "-wal").exists()
-    queries = ["?mode=ro"] if live else ["?mode=ro&immutable=1"]
-    last = None
-    for query in queries:
-        try:
-            conn = sqlite3.connect(base + query, uri=True, timeout=5)
-            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
-            return conn
-        except sqlite3.Error as e:
-            last = e
-    log.warning("Could not open %s read-only: %s", db, last)
-    return None
+    idle_wal = _is_wal(db) and not db.with_name(db.name + "-wal").exists()
+    query = "?mode=ro&immutable=1" if idle_wal else "?mode=ro"
+    try:
+        conn = sqlite3.connect(base + query, uri=True, timeout=5)
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return conn
+    except sqlite3.Error as e:
+        log.warning("Could not open %s read-only: %s", db, e)
+        return None
 
 
 def text(value) -> str | None:

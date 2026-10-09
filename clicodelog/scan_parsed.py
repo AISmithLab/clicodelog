@@ -64,7 +64,9 @@ def scan_parsed(path: Path, source_id: str, st) -> dict | None:
         "mtime": st.st_mtime,
         "modified": datetime.fromtimestamp(st.st_mtime).isoformat(),
         "full_path": str(path),
-        "subagent_count": _subagents(path),
+        # Cursor sub-agents live in other files; the index fills this in from
+        # one shared walk (editor_rows.subagent_counts). VS Code has none.
+        "subagent_count": 0,
         "cwd": meta.get("cwd") or "",
         "usage": usage,
         "models": models,
@@ -73,13 +75,3 @@ def scan_parsed(path: Path, source_id: str, st) -> dict | None:
         "gemini_hash": "",
     }
 
-
-def _subagents(path: Path) -> int:
-    """Cursor transcripts keep sub-agents in <session>/subagents/ beside the file."""
-    sub = path.parent / "subagents"
-    if path.parent.name != path.stem or not sub.is_dir():
-        return 0
-    try:
-        return sum(1 for _ in sub.rglob("*.jsonl"))
-    except OSError:
-        return 0

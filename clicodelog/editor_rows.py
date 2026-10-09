@@ -23,15 +23,20 @@ from .sync_vscode import EMPTY_WINDOW
 NO_WORKSPACE = "_no-workspace"
 
 
-def session_files(source_id: str, data_dir: Path):
-    """Yield (file, project_dir) for each session of an editor source."""
+def session_files(source_id: str, data_dir: Path, listed=None):
+    """Yield (file, project_dir) for each session of an editor source.
+
+    `listed(file)` says whether a store export really produced a session; a
+    transcript is only hidden behind one that did. (An export whose bubbles
+    never made it out of Cursor's database yields nothing, and the transcript
+    is then the only copy of that chat.) The index passes it; other callers get
+    the plain by-id rule.
+    """
     if source_id == "vscode":
         for ws in sorted(p for p in data_dir.iterdir() if p.is_dir()):
             chats = ws / "chatSessions"
             if chats.is_dir():
-                for f in sorted(chats.iterdir()):
-                    if f.suffix in (".json", ".jsonl") and f.is_file():
-                        yield f, ws
+                yield from ((f, ws) for f in _one_file_per_chat(chats))
         return
 
     stored = set()
@@ -40,8 +45,9 @@ def session_files(source_id: str, data_dir: Path):
             # */*.jsonl leaves out cli/<ws>/_subagents/, kept but not listed.
             for f in sorted((data_dir / kind).glob("*/*.jsonl")):
                 if f.stem not in stored:
-                    stored.add(f.stem)
-                    yield f, f.parent
+                    yield f, f.parent          # the caller indexes it before we resume
+                    if listed is None or listed(f):
+                        stored.add(f.stem)
     transcripts = data_dir / "transcripts"
     if transcripts.is_dir():
         for slug in sorted(p for p in transcripts.iterdir() if p.is_dir()):
@@ -49,6 +55,22 @@ def session_files(source_id: str, data_dir: Path):
                 if f.stem in stored and "subagents" not in f.relative_to(slug).parts:
                     continue                      # the store's copy is listed instead
                 yield f, slug
+
+
+def _one_file_per_chat(chats: Path) -> list:
+    """Copilot migrated chats from <id>.json to <id>.jsonl; the additive backup
+    keeps both, so list one per id — the more recently written."""
+    best: dict = {}
+    for f in chats.iterdir():
+        if f.suffix not in (".json", ".jsonl") or not f.is_file():
+            continue
+        try:
+            key = (f.stat().st_mtime, f.suffix == ".jsonl")
+        except OSError:
+            continue
+        if f.stem not in best or key > best[f.stem][0]:
+            best[f.stem] = (key, f)
+    return [f for _, f in sorted(best.values(), key=lambda kv: kv[1].name)]
 
 
 def _header(path: Path) -> dict:
@@ -81,9 +103,10 @@ def subagent_counts(data_dir: Path) -> dict:
     so this is computed once per refresh rather than globbed per chat.
     """
     out: dict = {}
-    for f in (data_dir / "transcripts").glob("*/*/subagents/*.jsonl"):
-        parent = f.parent.parent.name
-        out[parent] = out.get(parent, 0) + 1
+    for sub in (data_dir / "transcripts").glob("*/*/subagents"):
+        n = sum(1 for _ in sub.rglob("*.jsonl"))
+        if n:
+            out[sub.parent.name] = out.get(sub.parent.name, 0) + n
     return out
 
 
@@ -105,7 +128,8 @@ def project_for(source_id: str, f: Path, project_dir: Path, info: dict,
     folder = folders.get(project_dir.name)
     if folder and not info["cwd"]:
         info["cwd"] = folder
-    return project_dir.name, folder or project_dir.name, parent, None
+    return project_dir.name, folder or project_dir.name, parent, \
+        (None if parent else subs.get(f.stem, 0))
 
 
 def refresh_derived(conn, data_dir: Path, folders: dict, subs: dict) -> None:

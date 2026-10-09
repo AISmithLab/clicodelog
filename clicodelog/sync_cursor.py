@@ -34,7 +34,6 @@ chat when you edit an earlier prompt), the old file is first kept beside it as
 
 import hashlib
 import json
-import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -42,7 +41,7 @@ from pathlib import Path
 from .cursor_store import as_json, has_table, key_range, open_readonly, text, workspaces
 from .editors import cursor_cli_chats_dir, cursor_projects_dir, cursor_user_dirs, safe_name
 from .logging_setup import get_logger
-from .storage import has_free_space, write_text_atomic
+from .storage import has_free_space, keep_superseded, write_text_atomic
 
 log = get_logger(__name__)
 
@@ -63,13 +62,17 @@ def _existing(dest: Path) -> dict:
     return out
 
 
-def header_fingerprint(path: Path) -> str | None:
+def read_header(path: Path) -> dict:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             head = json.loads(fh.readline() or "null")
-        return head.get("fingerprint") if isinstance(head, dict) else None
+        return head if isinstance(head, dict) else {}
     except (OSError, ValueError):
-        return None
+        return {}
+
+
+def header_fingerprint(path: Path) -> str | None:
+    return read_header(path).get("fingerprint")
 
 
 def _record_ids(path: Path) -> set:
@@ -107,19 +110,12 @@ def write_export(path: Path, records: list, new_ids: set, stats: dict) -> None:
     if path.exists():
         lost = _record_ids(path) - new_ids
         if lost:
-            stamp, n = time.strftime("%Y%m%d-%H%M%S"), 0
-            keep = path.with_name(f"{path.stem}.superseded-{stamp}.bak")
-            while keep.exists():           # never replace an earlier preserved copy
-                n += 1
-                keep = path.with_name(f"{path.stem}.superseded-{stamp}-{n}.bak")
-            try:
-                shutil.copy2(path, keep)
-                log.info("Cursor chat %s lost %d messages; kept old copy %s",
-                         path.stem, len(lost), keep.name)
-            except OSError:
-                log.warning("Could not preserve %s; leaving it untouched", path)
+            keep = keep_superseded(path)
+            if keep is None:
                 stats["failed"] += 1
                 return
+            log.info("Cursor chat %s lost %d messages; kept old copy %s",
+                     path.stem, len(lost), keep.name)
     if write_text_atomic(path, body):
         stats["copied"] += 1
     else:
@@ -140,8 +136,12 @@ def _export_composers(conn, spaces: list, dest: Path, stats: dict) -> None:
     rows = []
     if has_kv:
         lo, hi = key_range("composerData:")
+        # fetchall: each later query then runs in its own short read, instead
+        # of one transaction spanning the export that stops Cursor's WAL from
+        # checkpointing.
         rows = conn.execute("SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?",
-                            (lo, hi))
+                            (lo, hi)).fetchall()
+    full = _full_verify_due(dest)
     for key, value in rows:
         cid = key.split(":", 1)[1]
         raw = text(value) or ""
@@ -149,42 +149,89 @@ def _export_composers(conn, spaces: list, dest: Path, stats: dict) -> None:
         if not isinstance(composer, dict) or not cid:
             continue
         seen.add(cid)
-        _export_one(conn, cid, raw, composer, owner.get(cid), existing, dest, stats)
+        _export_one(conn, cid, raw, composer, owner.get(cid), existing, dest, stats, full)
 
     # Builds that kept whole chats inline in the workspace list, never in the KV.
     for cid, c in inline.items():
         if cid not in seen and c.get("conversation"):
             _export_one(None, cid, json.dumps(c, sort_keys=True), c, owner.get(cid),
-                        existing, dest, stats)
+                        existing, dest, stats, full)
+    if full and has_kv:
+        _mark_verified(dest)
 
 
-def _export_one(conn, cid, raw, composer, ws, existing, dest, stats) -> None:
+# Change detection runs in two tiers, because the global database is routinely
+# several GB and is read every hour:
+#   hourly — the composer record plus count, total length and rowid sum of its
+#            bubbles, all from one aggregate query that never reads a bubble.
+#            Cursor rewrites composerData (lastUpdatedAt, headers) whenever a
+#            chat changes, and a replaced row gets a new rowid.
+#   daily  — a hash of every bubble's content, which also catches an in-place
+#            UPDATE that kept the same length.
+FULL_VERIFY_SECONDS = 24 * 3600
+_VERIFIED = ".content-verified"
+
+
+def _full_verify_due(dest: Path) -> bool:
+    try:
+        return time.time() - (dest / _VERIFIED).stat().st_mtime >= FULL_VERIFY_SECONDS
+    except OSError:
+        return True
+
+
+def _mark_verified(dest: Path) -> None:
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / _VERIFIED).touch()
+    except OSError:
+        pass
+
+
+def _signature(conn, cid: str, raw: str) -> str:
+    sig = hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
+    if conn is None:
+        return sig
+    lo, hi = key_range(f"bubbleId:{cid}:")
+    n, size, rowids = conn.execute(
+        "SELECT count(*), COALESCE(sum(length(value)), 0), COALESCE(sum(rowid), 0) "
+        "FROM cursorDiskKV WHERE key >= ? AND key < ?", (lo, hi)).fetchone()
+    return f"{sig}:{n}:{size}:{rowids}"
+
+
+def _bubbles(conn, cid: str, raw: str) -> tuple[dict, str]:
+    """(bubble id -> bubble, hash of the composer and every bubble's content)."""
     bubbles = {}
-    # Content, not lengths: Cursor rewrites bubbles in place (a token count, a
-    # status, streamed text replaced by text of the same length).
     digest = hashlib.sha1(raw.encode("utf-8", "replace"))
     if conn is not None:
         lo, hi = key_range(f"bubbleId:{cid}:")
         for key, value in conn.execute(
                 "SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ? ORDER BY key",
-                (lo, hi)):
+                (lo, hi)).fetchall():
             body = text(value) or ""
             digest.update(key.encode("utf-8", "replace") + b"\0" + body.encode("utf-8", "replace"))
             b = as_json(body)
             if isinstance(b, dict):
                 bubbles[key.rsplit(":", 1)[1]] = b
-    fingerprint = digest.hexdigest() + f":{len(bubbles)}"
+    return bubbles, digest.hexdigest()
 
+
+def _export_one(conn, cid, raw, composer, ws, existing, dest, stats, full=False) -> None:
+    signature = _signature(conn, cid, raw)
     path = existing.get(cid) or (dest / "composers" / (ws["key"] if ws else NO_WORKSPACE)
                                  / f"{safe_name(cid)}.jsonl")
-    if path.exists() and header_fingerprint(path) == fingerprint:
+    head = read_header(path) if path.exists() else {}
+    if head.get("fingerprint") == signature and not full:
+        stats["skipped"] += 1
+        return
+    bubbles, content = _bubbles(conn, cid, raw)
+    if head.get("fingerprint") == signature and head.get("contentHash") == content:
         stats["skipped"] += 1
         return
 
     header = {"type": "cursor-backup", "version": 1, "kind": "composer",
               "composerId": cid, "workspace": (ws or {}).get("folder", ""),
-              "workspaceKey": (ws or {}).get("key", ""), "fingerprint": fingerprint,
-              "exportedAt": int(time.time() * 1000)}
+              "workspaceKey": (ws or {}).get("key", ""), "fingerprint": signature,
+              "contentHash": content, "exportedAt": int(time.time() * 1000)}
     records = [header, {"type": "composer", "data": composer}]
     order = [h.get("bubbleId") for h in composer.get("fullConversationHeadersOnly") or []
              if isinstance(h, dict)]

@@ -97,6 +97,24 @@ def write_text_atomic(path: Path, text: str) -> bool:
                 pass
 
 
+def keep_superseded(path: Path) -> Path | None:
+    """Copy path to <stem>.superseded-<time>.bak before it is overwritten by a
+    version that has lost content. Never replaces an earlier preserved copy.
+    Returns the copy, or None if it could not be made (the caller must then
+    leave path untouched)."""
+    stamp, n = datetime.now().strftime("%Y%m%d-%H%M%S"), 0
+    keep = path.with_name(f"{path.stem}.superseded-{stamp}.bak")
+    while keep.exists():
+        n += 1
+        keep = path.with_name(f"{path.stem}.superseded-{stamp}-{n}.bak")
+    try:
+        shutil.copy2(path, keep)
+        return keep
+    except OSError:
+        log.warning("Could not preserve %s before overwriting it", path, exc_info=True)
+        return None
+
+
 def has_free_space(path: Path, needed_bytes: int, *, margin: float = 1.2) -> tuple[bool, int]:
     """Is there room for needed_bytes (plus margin) on path's filesystem?
 

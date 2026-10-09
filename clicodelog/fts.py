@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from .config import APP_DATA_DIR, DATA_DIR, SOURCES
-from .fts_parsed import extract_parsed
+from .fts_extract import EXTRACT, extract_parsed
 from .logging_setup import get_logger
 from .parsers import WHOLE_FILE_PARSERS
 from .search_index import session_files
@@ -39,7 +39,6 @@ DB_FILE = APP_DATA_DIR / "fts.db"
 # Extracted text is ~14.4% of raw; the projected index is ~0.9 GB uncapped,
 # ~0.72 GB at 1k, ~0.46 GB with tool text excluded entirely.
 DEFAULT_TOOL_CAP = 4000
-TEXT_CAP = 200_000
 TEXT_RATIO = 0.144          # measured share of raw bytes that is indexable text
 INDEX_OVERHEAD = 1.75       # stored content + inverted index
 
@@ -141,121 +140,6 @@ def estimate_index_bytes(source_id: str | None = None) -> int:
     return int(total * TEXT_RATIO * INDEX_OVERHEAD)
 
 
-# --------------------------------------------------------------------- extract
-def _extract_claude(entry: dict):
-    etype = entry.get("type")
-    ts = entry.get("timestamp")
-    uid = entry.get("uuid")
-    if etype == "summary":
-        s = entry.get("summary")
-        if isinstance(s, str) and s.strip():
-            yield (uid, "summary", "summary", ts, s[:TEXT_CAP], "", None)
-        return
-    if etype not in ("user", "assistant"):
-        return
-    msg = entry.get("message")
-    if not isinstance(msg, dict):
-        return
-    content = msg.get("content")
-    if isinstance(content, str):
-        if content.strip():
-            yield (uid, etype, "text", ts, content[:TEXT_CAP], "", None)
-        return
-    if not isinstance(content, list):
-        return
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type")
-        if btype == "text":
-            t = block.get("text") or ""
-            if t.strip():
-                yield (uid, etype, "text", ts, t[:TEXT_CAP], "", None)
-        elif btype == "thinking":
-            t = block.get("thinking") or ""
-            if t.strip():
-                yield (uid, etype, "thinking", ts, t[:TEXT_CAP], "", None)
-        elif btype == "tool_use":
-            name = block.get("name") or ""
-            inp = block.get("input")
-            try:
-                inp_s = json.dumps(inp, ensure_ascii=False)
-            except (TypeError, ValueError):
-                inp_s = str(inp)
-            edited = None
-            if isinstance(inp, dict) and name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-                edited = inp.get("file_path") or inp.get("path")
-            yield (uid, etype, "tool_use", ts, "", f"{name} {inp_s}", edited)
-        elif btype == "tool_result":
-            c = block.get("content")
-            if isinstance(c, list):
-                c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
-            if isinstance(c, str) and c.strip():
-                yield (uid, etype, "tool_result", ts, "", c, None)
-
-
-def _extract_codex(entry: dict):
-    ts = entry.get("timestamp")
-    payload = entry.get("payload")
-    if not isinstance(payload, dict):
-        return
-    if entry.get("type") == "response_item":
-        role = payload.get("role")
-        if role in ("user", "assistant"):
-            parts = []
-            for block in payload.get("content") or []:
-                if isinstance(block, dict):
-                    t = block.get("text")
-                    if isinstance(t, str):
-                        parts.append(t)
-            text = "\n".join(parts)
-            if text.strip():
-                yield (payload.get("id"), role, "text", ts, text[:TEXT_CAP], "", None)
-        if payload.get("type") == "function_call":
-            yield (payload.get("id"), "assistant", "tool_use", ts, "",
-                   f"{payload.get('name') or ''} {payload.get('arguments') or ''}", None)
-        elif payload.get("type") == "function_call_output":
-            out = payload.get("output")
-            if isinstance(out, str) and out.strip():
-                yield (payload.get("id"), "assistant", "tool_result", ts, "", out, None)
-    elif entry.get("type") == "event_msg":
-        p = payload.get("type")
-        if p in ("user_message", "agent_message"):
-            m = payload.get("message")
-            if isinstance(m, str) and m.strip():
-                role = "user" if p == "user_message" else "assistant"
-                yield (None, role, "text", ts, m[:TEXT_CAP], "", None)
-
-
-def _extract_gemini(entry: dict):
-    def one(msg):
-        if not isinstance(msg, dict):
-            return
-        mtype = msg.get("type")
-        ts = msg.get("timestamp")
-        uid = msg.get("id")
-        content = msg.get("content")
-        if isinstance(content, list):
-            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-        if not isinstance(content, str) or not content.strip():
-            return
-        role = "user" if mtype == "user" else ("assistant" if mtype in
-                                               ("gemini", "model", "assistant") else None)
-        if role is None:
-            return
-        yield (uid, role, "text", ts, content[:TEXT_CAP], "", None)
-
-    mutation = entry.get("$set")
-    if isinstance(mutation, dict) and isinstance(mutation.get("messages"), list):
-        for m in mutation["messages"]:
-            yield from one(m)
-    elif entry.get("type"):
-        yield from one(entry)
-
-
-_EXTRACT = {"claude-code": _extract_claude, "codex": _extract_codex, "gemini": _extract_gemini}
-
-
 # --------------------------------------------------------------------- build
 def _index_file(conn, path: Path, source_id: str, project_id: str, project_name: str,
                 tool_cap: int) -> int:
@@ -308,7 +192,7 @@ def _index_file(conn, path: Path, source_id: str, project_id: str, project_name:
             last_ts = ts or last_ts
         return _store_rows(conn, fid, st, project_id, project_name, rows, edit_rows, last_ts)
 
-    extract = _EXTRACT[source_id]
+    extract = EXTRACT[source_id]
     try:
         with open(path, "rb") as fh:
             if start_offset:
@@ -393,7 +277,12 @@ def build_index(source_id: str, *, tool_cap: int = DEFAULT_TOOL_CAP,
         # A compact {path: (project_id, project_name)} map, not full rows.
         entries = _idx.path_project_map(source_id)
         data_dir = DATA_DIR / SOURCES[source_id]["data_subdir"]
-        paths = [f for f, _ in session_files(source_id, data_dir)]
+        if source_id in WHOLE_FILE_PARSERS:
+            # The metadata index already settled which copy of a chat is listed
+            # (Cursor store vs transcript, .json vs .jsonl); index exactly that.
+            paths = sorted(Path(p) for p in entries if Path(p).is_file())
+        else:
+            paths = [f for f, _ in session_files(source_id, data_dir)]
         total = len(paths)
         _progress[source_id] = {"state": "building", "done": 0, "total": total,
                                 "messages": 0, "started": time.time()}
@@ -423,6 +312,14 @@ def build_index(source_id: str, *, tool_cap: int = DEFAULT_TOOL_CAP,
                     _progress[source_id] = {"state": "blocked", "reason": msg,
                                             "done": i + 1, "total": total}
                     return _progress[source_id]
+        conn.commit()
+
+        # Project names can change without the file changing (a Cursor
+        # transcript learns its folder from another file), so re-apply them.
+        conn.executemany(
+            "UPDATE files SET project_id=?, project_name=? WHERE path=? "
+            "AND (project_id IS NOT ? OR project_name IS NOT ?)",
+            [(pid, pname, path, pid, pname) for path, (pid, pname) in entries.items()])
         conn.commit()
 
         # Drop rows for files that are gone from the backup.

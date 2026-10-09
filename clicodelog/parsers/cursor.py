@@ -68,8 +68,10 @@ def _append(messages: list, msg: dict) -> None:
         if msg.get("edited_files"):
             prev["edited_files"] = (prev.get("edited_files") or []) + msg["edited_files"]
         if msg.get("usage"):
-            u = prev.get("usage") or {}
-            prev["usage"] = {k: (u.get(k) or 0) + (msg["usage"].get(k) or 0) for k in msg["usage"]}
+            # Every counter either side has — iterating only the new bubble's
+            # keys dropped the earlier turn's input and cache tokens.
+            u, v = prev.get("usage") or {}, msg["usage"]
+            prev["usage"] = {k: (u.get(k) or 0) + (v.get(k) or 0) for k in {*u, *v}}
         return
     messages.append(msg)
 

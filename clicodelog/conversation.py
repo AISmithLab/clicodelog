@@ -111,7 +111,17 @@ def _find_editor_file(data_dir: Path, project_id: str, session_id: str, source_i
     project than the chat it is opened from, so fall back to the id alone."""
     from . import search_index as _idx
     entry = _idx.entry_for_session(source_id, project_id, session_id)
-    candidate = entry["full_path"] if entry else _idx.path_for_session_id(source_id, session_id)
+    candidate = entry["full_path"] if entry else None
+    if candidate is None and source_id == "vscode":
+        # A VS Code chat lives under its own workspace; never serve another
+        # workspace's copy of the same id (Code and Insiders can share one).
+        ws = safe_child(data_dir, project_id)
+        for ext in (".jsonl", ".json"):
+            if ws is not None and (ws / "chatSessions" / f"{session_id}{ext}").is_file():
+                return ws / "chatSessions" / f"{session_id}{ext}"
+        return None
+    if candidate is None:
+        candidate = _idx.path_for_session_id(source_id, session_id)
     if candidate:
         p = Path(candidate)
         try:
@@ -121,10 +131,6 @@ def _find_editor_file(data_dir: Path, project_id: str, session_id: str, source_i
         if p.is_file():
             return p
     if source_id == "vscode":
-        ws = safe_child(data_dir, project_id)
-        for ext in (".jsonl", ".json"):
-            if ws is not None and (ws / "chatSessions" / f"{session_id}{ext}").is_file():
-                return ws / "chatSessions" / f"{session_id}{ext}"
         return None
     # The id is matched literally: "*" or "[" in it must not act as a wildcard.
     name = glob.escape(session_id) + ".jsonl"

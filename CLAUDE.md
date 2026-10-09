@@ -65,8 +65,9 @@ clicodelog/
 ├── editors.py        # per-OS editor user dirs, URI -> path, safe names, slugs
 ├── editor_rows.py    # editor sources: session files + project keys
 ├── scan_parsed.py    # metadata for sources read through their parser
-├── fts_parsed.py     # FTS rows for sources read through their parser
+├── fts_extract.py    # FTS text extraction per source (line-based + whole-file)
 ├── search_index.py   # metadata index; backs listings, projects and search
+├── metastore_stats.py # token-usage analytics queries over the metadata store
 ├── fts.py            # SQLite FTS5 content index, query sanitizer
 ├── sessions.py       # session listings (from the index)
 ├── projects.py       # project listings (from the index)
@@ -138,7 +139,7 @@ The root `app.py` and `requirements.txt` are legacy Flask artifacts — ignore t
    (VS Code, Cursor) goes in `WHOLE_FILE_PARSERS` instead, and scanning and
    indexing then use its parser.
 3. Add a parser module in `parsers/` and export it from `parsers/__init__.py`.
-4. Add an extractor to `fts._EXTRACT`.
+4. Add an extractor to `fts_extract.EXTRACT` (whole-file sources need none).
 5. Add the source to the parametrised contract test in `tests/test_sources.py`.
 
 Per-source behaviour is still spread across those call sites rather than living

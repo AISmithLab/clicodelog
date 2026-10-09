@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from clicodelog import fts, parsers, search_index, sessions, sync
+from clicodelog import conversation, fts, parsers, search_index, sessions, sync
 from clicodelog.conversation import get_conversation
 from clicodelog.editors import cursor_slug
 from clicodelog.parsers.cursor import parse_cursor_conversation
@@ -71,9 +71,37 @@ def test_same_length_bubble_edit_is_backed_up(isolated):
                  (json.dumps(b6),))
     conn.commit()
     conn.close()
+    # An in-place UPDATE that keeps the length and leaves composerData alone is
+    # invisible to the hourly check, which never reads bubble content...
     sync.sync_data("cursor", silent=True)
-    conv = get_conversation(SLUG, "c-main", "cursor")
-    assert conv["messages"][-1]["content"] == "Renamed `f` to `h`."
+    assert get_conversation(SLUG, "c-main", "cursor")["messages"][-1]["content"] == \
+        "Renamed `f` to `g`."
+    # ...and is caught by the daily content verification.
+    marker = isolated["data"] / "cursor" / ".content-verified"
+    day_ago = marker.stat().st_mtime - 25 * 3600
+    os.utime(marker, (day_ago, day_ago))
+    sync.sync_data("cursor", silent=True)
+    conversation.clear_cache()
+    assert get_conversation(SLUG, "c-main", "cursor")["messages"][-1]["content"] == \
+        "Renamed `f` to `h`."
+
+
+def test_hourly_sync_of_an_unchanged_chat_reads_no_bubble_content(isolated, monkeypatch):
+    from clicodelog import sync_cursor
+    write_cursor_store(isolated["cursor_user"], {"c-main": cursor_conversation()})
+    sync.sync_data("cursor", silent=True)              # first sync: full export + verify
+    reads = []
+    real = sync_cursor._bubbles
+    monkeypatch.setattr(sync_cursor, "_bubbles", lambda *a: reads.append(a) or real(*a))
+    sync.sync_data("cursor", silent=True)
+    assert reads == []
+
+    # A chat that does change is still re-read and re-exported within the hour.
+    write_cursor_store(isolated["cursor_user"],
+                       {"c-main": cursor_conversation() + [bubble("b9", 1, "one more")]})
+    sync.sync_data("cursor", silent=True)
+    assert len(reads) == 1
+    assert get_conversation(SLUG, "c-main", "cursor")["messages"][-1]["content"] == "one more"
 
 
 def test_one_odd_record_does_not_drop_the_chat(tmp_path):
@@ -147,3 +175,128 @@ def test_pre_index_listing_works_under_a_path_named_subagents(tmp_path, monkeypa
                                encoding="utf-8")
     monkeypatch.setattr("clicodelog.sessions.DATA_DIR", root)
     assert [s["id"] for s in sessions._scan_project(WS_HASH, "vscode")] == ["s"]
+
+
+# ------------------------------------------------------------- PR #1 review
+def test_a_chat_kept_as_json_and_jsonl_is_listed_once(isolated):
+    make_vscode(isolated["vscode_user"])
+    sync.sync_data("vscode", silent=True)
+    chats = isolated["data"] / "vscode" / WS_HASH / "chatSessions"
+    old = chats / "sess-json.json"
+    (chats / "sess-json.jsonl").write_text(
+        json.dumps({"kind": 0, "v": json.loads(old.read_text(encoding="utf-8"))}) + "\n"
+        + json.dumps({"kind": 1, "k": ["customTitle"], "v": "migrated"}) + "\n",
+        encoding="utf-8")
+    os.utime(old, (1, 1))                                   # the .json is the stale one
+    search_index.refresh_index("vscode")
+    rows = [s for s in sessions.get_sessions(WS_HASH, "vscode")["sessions"] if s["id"] == "sess-json"]
+    assert len(rows) == 1 and rows[0]["summary"] == "migrated"
+    assert get_conversation(WS_HASH, "sess-json", "vscode")["summaries"] == ["migrated"]
+
+
+def test_transcript_is_listed_when_the_store_copy_is_empty(isolated):
+    write_cursor_store(isolated["cursor_user"], {"c-main": []})     # composer, no bubbles
+    write_transcripts(isolated["cursor_projects"], SLUG, {"c-main": transcript_lines("real chat")})
+    sync.sync_data("cursor", silent=True)
+    page = sessions.get_sessions(SLUG, "cursor")
+    assert [(s["id"], s["summary"]) for s in page["sessions"]] == [("c-main", "real chat")]
+    fts.build_index("cursor")
+    assert [h["session_id"] for h in fts.search_content("real chat", "cursor")] == ["c-main"]
+
+    # Once the store copy has messages, it takes over, and nothing is listed twice.
+    write_cursor_store(isolated["cursor_user"], {"c-main": cursor_conversation()})
+    sync.sync_data("cursor", silent=True)
+    page = sessions.get_sessions(SLUG, "cursor")
+    assert [(s["id"], s["summary"]) for s in page["sessions"]] == [("c-main", "Rename function")]
+
+
+def test_read_mode_follows_the_journal_mode(tmp_path, monkeypatch):
+    from clicodelog import cursor_store
+    uris = []
+    real = sqlite3.connect
+    monkeypatch.setattr(cursor_store.sqlite3, "connect",
+                        lambda target, **kw: uris.append(target) or real(target, **kw))
+    rollback = tmp_path / "rollback.db"
+    c = real(rollback)
+    c.execute("CREATE TABLE t(x)")
+    c.commit()
+    c.close()
+    wal = tmp_path / "wal.db"
+    c = real(wal)
+    c.execute("PRAGMA journal_mode=wal")
+    c.execute("CREATE TABLE t(x)")
+    c.commit()
+    c.close()                                               # checkpointed: no -wal left
+    for db in (rollback, wal):
+        cursor_store.open_readonly(db).close()
+    assert uris[0].endswith("?mode=ro"), "a rollback-mode file needs locking, never immutable"
+    assert uris[1].endswith("immutable=1"), "an idle WAL file is read without creating sidecars"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["rollback.db", "wal.db"]
+
+
+def test_vscode_rewrite_that_drops_turns_keeps_the_old_copy(isolated):
+    make_vscode(isolated["vscode_user"])
+    sync.sync_data("vscode", silent=True)
+    src = isolated["vscode_user"] / "workspaceStorage" / WS_HASH / "chatSessions" / "sess-json.json"
+    session = json.loads(src.read_text(encoding="utf-8"))
+    session["requests"] = session["requests"][:1]           # the user removed a turn
+    src.write_text(json.dumps(session), encoding="utf-8")
+    sync.sync_data("vscode", silent=True)
+    chats = isolated["data"] / "vscode" / WS_HASH / "chatSessions"
+    kept = list(chats.glob("sess-json.superseded-*.bak"))
+    assert len(kept) == 1
+    assert len(json.loads(kept[0].read_text(encoding="utf-8"))["requests"]) == 2
+    assert sessions.get_sessions(WS_HASH, "vscode")["total"] == 2, "the .bak is not listed"
+
+    # Growth (a new turn) loses nothing, so it keeps no copy.
+    session["requests"] = session["requests"] + [vscode_request(5, "more", "ok")]
+    src.write_text(json.dumps(session), encoding="utf-8")
+    sync.sync_data("vscode", silent=True)
+    assert len(list(chats.glob("*.bak"))) == 1
+
+
+def test_search_hits_pick_up_a_project_name_learned_later(isolated):
+    write_transcripts(isolated["cursor_projects"], SLUG, {"t-1": transcript_lines("findme")})
+    sync.sync_data("cursor", silent=True)
+    fts.build_index("cursor")
+    assert fts.search_content("findme", "cursor")[0]["project_name"] == SLUG
+    write_cursor_store(isolated["cursor_user"], {"c-main": cursor_conversation()})
+    sync.sync_data("cursor", silent=True)
+    fts.build_index("cursor")
+    assert fts.search_content("findme", "cursor")[0]["project_name"] == FOLDER
+
+
+def test_folding_a_bubble_keeps_every_token_counter():
+    from clicodelog.parsers.cursor import _append
+    messages = [{"role": "assistant", "content": "x", "usage": {
+        "input_tokens": 5000, "cache_read_input_tokens": 40000, "output_tokens": 10}}]
+    _append(messages, {"role": "assistant", "content": "", "tool_uses": [{"name": "t"}],
+                       "usage": {"output_tokens": 20}})
+    assert messages[0]["usage"] == {"input_tokens": 5000, "cache_read_input_tokens": 40000,
+                                    "output_tokens": 30}
+
+
+def test_nested_subagents_are_counted_once_and_consistently(isolated):
+    write_transcripts(isolated["cursor_projects"], SLUG, {"t-1": transcript_lines("parent")},
+                      subagents={"t-1": {"a": transcript_lines("x")}})
+    nested = (isolated["cursor_projects"] / SLUG / "agent-transcripts" / "t-1" / "subagents"
+              / "wf" / "b.jsonl")
+    nested.parent.mkdir(parents=True)
+    nested.write_text(json.dumps(transcript_lines("y")[0]) + "\n", encoding="utf-8")
+    for _ in range(2):                                      # stable across refreshes
+        sync.sync_data("cursor", silent=True)
+        row = sessions.get_sessions(SLUG, "cursor")["sessions"][0]
+        assert row["subagent_count"] == 2
+        assert len(sessions.get_subagent_sessions(SLUG, "t-1", "cursor")) == 2
+
+
+def test_vscode_never_serves_another_workspaces_copy(isolated):
+    make_vscode(isolated["vscode_user"])
+    sync.sync_data("vscode", silent=True)
+    other = isolated["data"] / "vscode" / "insiders-x" / "chatSessions"
+    other.mkdir(parents=True)
+    (other / "only-there.json").write_text(
+        json.dumps(vscode_session("only-there", [vscode_request(0, "q", "a")])), encoding="utf-8")
+    search_index.refresh_index("vscode")
+    assert get_conversation(WS_HASH, "only-there", "vscode") == {"error": "Session not found"}
+    assert get_conversation("insiders-x", "only-there", "vscode")["messages"]
