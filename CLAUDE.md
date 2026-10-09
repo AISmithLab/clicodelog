@@ -58,6 +58,14 @@ clicodelog/
 ├── storage.py        # atomic JSON read/write, quarantine, disk checks
 ├── scan.py           # ONE-PASS session metadata extraction (all 3 sources)
 ├── sync.py           # additive clone-backup, background + initial sync
+├── sync_vscode.py    # VS Code: copies chatSessions/ + workspace.json only
+├── sync_cursor.py    # Cursor: exports chats from state.vscdb, copies transcripts
+├── sync_cursor_cli.py # Cursor CLI: exports ~/.cursor/chats/*/*/store.db
+├── cursor_store.py   # read-only access to Cursor's SQLite databases
+├── editors.py        # per-OS editor user dirs, URI -> path, safe names, slugs
+├── editor_rows.py    # editor sources: session files + project keys
+├── scan_parsed.py    # metadata for sources read through their parser
+├── fts_parsed.py     # FTS rows for sources read through their parser
 ├── search_index.py   # metadata index; backs listings, projects and search
 ├── fts.py            # SQLite FTS5 content index, query sanitizer
 ├── sessions.py       # session listings (from the index)
@@ -67,7 +75,7 @@ clicodelog/
 ├── metadata.py       # custom project names/tags (atomic, locked)
 ├── utils.py          # path ids, id validation, per-source helpers
 ├── server.py         # port handling, startup, uvicorn
-├── parsers/          # claude.py, codex.py, gemini.py
+├── parsers/          # claude, codex, gemini, cursor (+ cursor_cli), vscode (+ vscode_log)
 ├── routes/           # projects, search, export, sync, sources, bookmarks, stats
 ├── static/css/*.css
 ├── static/js/*.js    # vanilla, no build step; vendor/ holds marked+purify+hljs
@@ -106,12 +114,29 @@ The root `app.py` and `requirements.txt` are legacy Flask artifacts — ignore t
   the display name from the session's recorded `cwd`.
 - **Validate route ids with `is_safe_id` / `safe_child`** before joining them
   into a filesystem path.
+- **Always pass `encoding="utf-8"` to `open()` / `read_text()` / `write_text()`.**
+  Windows defaults to cp1252, which mangles non-Latin text or fails to write
+  it. `tests/test_platform.py` runs the pipeline with `EncodingWarning` as an
+  error to catch this.
+- **Never open Cursor's SQLite files (`state.vscdb`, CLI `store.db`) except via
+  `cursor_store.open_readonly`.** Even `mode=ro` creates `-wal`/`-shm` sidecars
+  in Cursor's directory; it uses `immutable=1` when no `-wal` exists and
+  `mode=ro` only when one does.
+- **Markdown export must keep content inside its block.** Tool output is fenced
+  with `_fence()` (longer than any backtick run in it) and message text goes
+  through `_closed()`. A fixed ``` fence broke 93 of 153 real Copilot exports.
+- **Editor locations are per-OS.** Resolve them through `editors.py`, never
+  hard-code `~/Library/Application Support`.
 
 ## Adding a source
 
-1. Add an entry to `SOURCES` in `config.py`.
+1. Add an entry to `SOURCES` in `config.py`. A source that is not one plain
+   directory tree (like Cursor's SQLite store) names a `syncer` module with
+   `sync(dest_dir, stats, copy)` and `source_roots()`.
 2. Add a reader branch in `scan.py` and an entry-shape branch in
-   `search_index._entry_for`.
+   `metastore._row_for`. A source whose files only make sense parsed whole
+   (VS Code, Cursor) goes in `WHOLE_FILE_PARSERS` instead, and scanning and
+   indexing then use its parser.
 3. Add a parser module in `parsers/` and export it from `parsers/__init__.py`.
 4. Add an extractor to `fts._EXTRACT`.
 5. Add the source to the parametrised contract test in `tests/test_sources.py`.

@@ -18,6 +18,7 @@ from .metastore import (  # noqa: F401
     is_ready,
     iter_entries,
     json_counter_totals,
+    path_for_session_id,
     path_project_map,
     project_session_count,
     projects_for_source,
@@ -33,7 +34,7 @@ from .metastore import (  # noqa: F401
 
 __all__ = [
     "DB_FILE", "connect", "count", "entry_for_session", "is_ready", "iter_entries",
-    "json_counter_totals", "path_project_map", "project_session_count",
+    "json_counter_totals", "path_for_session_id", "path_project_map", "project_session_count",
     "projects_for_source", "refresh_index",
     "search_index", "session_files", "sessions_for_project", "subagent_sessions",
     "summaries_for", "usage_by", "usage_totals",

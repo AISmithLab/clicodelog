@@ -7,10 +7,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Editor data lives in a different place on each OS (and Windows defaults
+    # to a non-UTF-8 text encoding), so every platform runs the suite.
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.12"]
 
     steps:
@@ -33,6 +36,7 @@ jobs:
       # excluded from every published wheel, so markdown rendering and syntax
       # highlighting silently degraded for anyone installing from PyPI.
       - name: Verify the wheel actually contains its assets
+        shell: bash
         run: |
           python -m build --wheel --outdir dist/
           python - <<'PY'

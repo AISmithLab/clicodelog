@@ -16,8 +16,10 @@ import threading
 import time
 from pathlib import Path
 
+from . import editor_rows
 from .config import APP_DATA_DIR, DATA_DIR, SOURCES
 from .logging_setup import get_logger
+from .parsers import WHOLE_FILE_PARSERS
 from .scan import scan_session
 from .storage import has_free_space
 from .utils import encode_path_id
@@ -160,6 +162,8 @@ def session_files(source_id: str, data_dir: Path):
         elif source_id == "codex":
             for f in data_dir.rglob("*.jsonl"):
                 yield f, None
+        elif source_id in WHOLE_FILE_PARSERS:
+            yield from editor_rows.session_files(source_id, data_dir)
         else:
             # Gemini CLI writes .jsonl. The old glob asked for .json and matched
             # nothing, which is why this source silently reported no sessions.
@@ -169,13 +173,19 @@ def session_files(source_id: str, data_dir: Path):
         log.warning("Could not walk %s: %s", data_dir, e)
 
 
-def _row_for(source_id: str, f: Path, project_dir) -> tuple | None:
+def _row_for(source_id: str, f: Path, project_dir, folders: dict | None = None,
+             subs: dict | None = None) -> tuple | None:
     info = scan_session(f, source_id)
     if info is None:
         return None
 
     parent = None
-    if source_id == "claude-code":
+    if source_id in WHOLE_FILE_PARSERS:
+        project_id, project_name, parent, sub_count = editor_rows.project_for(
+            source_id, f, project_dir, info, folders or {}, subs or {})
+        if sub_count is not None:
+            info["subagent_count"] = sub_count
+    elif source_id == "claude-code":
         project_id = project_dir.name
         # The directory name is a lossy hash — Claude Code collapses "/", "_"
         # and "-" all into "-" — so the recorded cwd is authoritative.
@@ -256,6 +266,14 @@ def _refresh_one(sid: str, data_dir: Path, force: bool) -> dict:
         conn.execute("DELETE FROM sessions WHERE source=?", (sid,))
         conn.commit()
 
+    # Cursor rows depend on other files: a transcript takes its project's folder
+    # from the store exports, and a chat's sub-agent count from transcripts.
+    # Both maps are built once per refresh, then re-applied to unchanged rows.
+    folders = subs = None
+    if sid == "cursor":
+        folders = editor_rows.slug_folders(data_dir)
+        subs = editor_rows.subagent_counts(data_dir)
+
     seen, batch, changed = set(), [], 0
     for f, project_dir in session_files(sid, data_dir):
         key = str(f)
@@ -267,7 +285,7 @@ def _refresh_one(sid: str, data_dir: Path, force: bool) -> dict:
         prev = known.get(key)
         if prev and prev[0] == st.st_size and prev[1] == st.st_mtime:
             continue                                  # unchanged
-        row = _row_for(sid, f, project_dir)
+        row = _row_for(sid, f, project_dir, folders, subs)
         if row:
             batch.append(row)
             changed += 1
@@ -280,6 +298,8 @@ def _refresh_one(sid: str, data_dir: Path, force: bool) -> dict:
     gone = [p for p in known if p not in seen]
     if gone:
         conn.executemany("DELETE FROM sessions WHERE path=?", [(p,) for p in gone])
+    if sid == "cursor":
+        editor_rows.refresh_derived(conn, data_dir, folders, subs)
     conn.commit()
 
     counts = conn.execute(
@@ -346,11 +366,22 @@ def sessions_for_project(source_id: str, project_id: str, *, top_level_only: boo
     return [_row_to_listing(r) for r in connect().execute(sql, params)]
 
 
-def subagent_sessions(source_id: str, project_id: str, session_id: str) -> list:
-    return [_row_to_listing(r) for r in connect().execute(
-        f"SELECT {LIST_COLUMNS} FROM sessions WHERE source=? AND project_id=? "
-        f"AND parent_session=? ORDER BY mtime DESC",
-        (source_id, project_id, session_id))]
+def subagent_sessions(source_id: str, project_id: str | None, session_id: str) -> list:
+    """project_id None matches any project: a Cursor chat listed from the store
+    keeps its sub-agents under the transcript's project instead."""
+    sql = f"SELECT {LIST_COLUMNS} FROM sessions WHERE source=? AND parent_session=?"
+    params: list = [source_id, session_id]
+    if project_id is not None:
+        sql += " AND project_id=?"
+        params.append(project_id)
+    return [_row_to_listing(r) for r in connect().execute(sql + " ORDER BY mtime DESC", params)]
+
+
+def path_for_session_id(source_id: str, session_id: str) -> str | None:
+    r = connect().execute("SELECT path FROM sessions WHERE source=? AND session_id=? "
+                          "ORDER BY parent_session IS NOT NULL LIMIT 1",
+                          (source_id, session_id)).fetchone()
+    return r["path"] if r else None
 
 
 def projects_for_source(source_id: str) -> list:

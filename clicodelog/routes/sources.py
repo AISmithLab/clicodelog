@@ -1,3 +1,5 @@
+import importlib
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
@@ -8,11 +10,17 @@ from ..search_index import count as indexed_count
 router = APIRouter()
 
 
+def _roots(cfg: dict) -> list:
+    """Editor sources look in several places, resolved now rather than at import."""
+    if cfg.get("syncer"):
+        return importlib.import_module(f"clicodelog.{cfg['syncer']}").source_roots()
+    return [cfg["source_dir"]]
+
+
 @router.get("/api/sources")
 def api_sources():
     out = []
     for sid, cfg in SOURCES.items():
-        source_dir = cfg["source_dir"]
         data_dir = DATA_DIR / cfg["data_subdir"]
         indexed = indexed_count(sid)      # SELECT count(*), not a full load
 
@@ -30,7 +38,7 @@ def api_sources():
         out.append({
             "id": sid,
             "name": cfg["name"],
-            "available": source_dir.exists(),
+            "available": any(p.exists() for p in _roots(cfg)),
             "session_count": indexed,
             "warning": ("Files are present but none could be read — the log format "
                         "may have changed.") if (has_files and indexed == 0) else None,

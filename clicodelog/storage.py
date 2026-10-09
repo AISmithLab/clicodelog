@@ -41,9 +41,9 @@ def load_json(path: Path, default):
     if not path.exists():
         return default
     try:
-        with open(path, "r") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         quarantine(path)
         return default
     except OSError:
@@ -65,12 +65,22 @@ def write_json(path: Path, data, *, keep_backup: bool = False, indent: int | Non
         except OSError:
             log.warning("Could not refresh backup for %s", path, exc_info=True)
 
+    return write_text_atomic(path, json.dumps(data, indent=indent))
+
+
+def write_text_atomic(path: Path, text: str) -> bool:
+    """Atomically write UTF-8 text to path (temp file, fsync, os.replace).
+
+    The encoding is explicit: without it Python uses the locale's, which on
+    Windows is cp1252 — non-Latin text then fails to write at all.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = None
     try:
         # Same directory, so os.replace stays on one filesystem and is atomic.
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, indent=indent)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_name, path)

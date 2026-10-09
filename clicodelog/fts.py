@@ -25,7 +25,9 @@ import time
 from pathlib import Path
 
 from .config import APP_DATA_DIR, DATA_DIR, SOURCES
+from .fts_parsed import extract_parsed
 from .logging_setup import get_logger
+from .parsers import WHOLE_FILE_PARSERS
 from .search_index import session_files
 from .storage import has_free_space
 
@@ -269,7 +271,8 @@ def _index_file(conn, path: Path, source_id: str, project_id: str, project_name:
         fid = row["id"]
         if row["size"] == st.st_size and row["mtime"] == st.st_mtime:
             return 0                                        # unchanged
-        if st.st_size > row["size"] and row["indexed_bytes"]:
+        if (st.st_size > row["size"] and row["indexed_bytes"]
+                and source_id not in WHOLE_FILE_PARSERS):
             start_offset = row["indexed_bytes"]             # append-only fast path
         else:
             conn.execute("DELETE FROM messages WHERE file_id=?", (fid,))
@@ -281,11 +284,31 @@ def _index_file(conn, path: Path, source_id: str, project_id: str, project_name:
             (str(path), source_id, project_id, project_name, path.stem, st.st_size, st.st_mtime))
         fid = cur.lastrowid
 
-    extract = _EXTRACT[source_id]
     idx = conn.execute("SELECT COALESCE(MAX(msg_idx), -1) m FROM messages WHERE file_id=?",
                        (fid,)).fetchone()["m"]
     rows, edit_rows, last_ts = [], [], None
 
+    if source_id in WHOLE_FILE_PARSERS:
+        try:
+            produced = list(extract_parsed(path, source_id))
+        except Exception:
+            log.exception("Could not index %s", path)
+            # The row was stamped with this size/mtime before parsing; clear the
+            # stamp so the next build retries instead of treating it as done.
+            conn.execute("UPDATE files SET size=-1, mtime=-1 WHERE id=?", (fid,))
+            return 0
+        for uid, role, kind, ts, dialog, tool, edited in produced:
+            if edited:
+                edit_rows.append((fid, edited, uid, ts))
+                continue
+            idx += 1
+            if tool and tool_cap >= 0:
+                tool = tool[:tool_cap] if tool_cap else ""
+            rows.append((fid, idx, uid, role, kind, ts, dialog, tool))
+            last_ts = ts or last_ts
+        return _store_rows(conn, fid, st, project_id, project_name, rows, edit_rows, last_ts)
+
+    extract = _EXTRACT[source_id]
     try:
         with open(path, "rb") as fh:
             if start_offset:
@@ -324,7 +347,10 @@ def _index_file(conn, path: Path, source_id: str, project_id: str, project_name:
     except OSError as e:
         log.warning("Could not index %s: %s", path, e)
         return 0
+    return _store_rows(conn, fid, st, project_id, project_name, rows, edit_rows, last_ts)
 
+
+def _store_rows(conn, fid, st, project_id, project_name, rows, edit_rows, last_ts) -> int:
     if rows:
         conn.executemany(
             "INSERT INTO messages(file_id,msg_idx,uuid,role,kind,ts,dialog,tool) "

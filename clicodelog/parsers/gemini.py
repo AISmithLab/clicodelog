@@ -86,7 +86,7 @@ def parse_gemini_conversation(session_file: Path, session_id: str) -> dict:
     header: dict = {}
     messages: list = []
 
-    with open(session_file, "r", errors="ignore") as f:
+    with open(session_file, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if not line.strip():
                 continue

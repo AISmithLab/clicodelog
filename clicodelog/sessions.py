@@ -12,6 +12,7 @@ from pathlib import Path
 from . import search_index as _idx
 from .config import DATA_DIR, SOURCES
 from .logging_setup import get_logger
+from .parsers import WHOLE_FILE_PARSERS
 from .scan import scan_session
 from .utils import decode_path_id, is_safe_id
 
@@ -67,10 +68,12 @@ def get_sessions(project_id: str, source_id: str, *,
 
 
 def get_subagent_sessions(project_id: str, session_id: str, source_id: str) -> list:
-    if source_id != "claude-code" or not (is_safe_id(project_id) and is_safe_id(session_id)):
+    if source_id not in ("claude-code", "cursor") or not (
+            is_safe_id(project_id) and is_safe_id(session_id)):
         return []
-    entries = _idx.subagent_sessions(source_id, project_id, session_id)
-    if entries:
+    entries = _idx.subagent_sessions(
+        source_id, project_id if source_id == "claude-code" else None, session_id)
+    if entries or source_id != "claude-code":
         return [_as_session(e) for e in entries]
 
     sub_dir = DATA_DIR / SOURCES[source_id]["data_subdir"] / project_id / session_id
@@ -128,6 +131,14 @@ def _scan_project(project_id: str, source_id: str) -> list:
             info = scan_session(f, source_id)
             if info and info["cwd"] == target:
                 files.append(f)
+    elif source_id in WHOLE_FILE_PARSERS:
+        if not data_dir.is_dir():
+            return []
+        # Before the index exists, list only what sits directly under the
+        # project's own directory; Cursor's slug grouping needs the index.
+        files = [f for f, pdir in _idx.session_files(source_id, data_dir)
+                 if pdir.name == project_id
+                 and "subagents" not in f.relative_to(data_dir).parts]
     else:
         for f in data_dir.rglob("chats/session-*.jsonl"):
             if f.parent.parent.name == project_id:
