@@ -16,8 +16,10 @@ import threading
 import time
 from pathlib import Path
 
+from . import editor_rows
 from .config import APP_DATA_DIR, DATA_DIR, SOURCES
 from .logging_setup import get_logger
+from .parsers import WHOLE_FILE_PARSERS
 from .scan import scan_session
 from .storage import has_free_space
 from .utils import encode_path_id
@@ -149,7 +151,7 @@ def _row_to_entry(r: sqlite3.Row) -> dict:
 
 
 # --------------------------------------------------------------------- walk
-def session_files(source_id: str, data_dir: Path):
+def session_files(source_id: str, data_dir: Path, listed=None):
     """Yield (file, project_dir) for every session file of a source."""
     try:
         if source_id == "claude-code":
@@ -160,6 +162,8 @@ def session_files(source_id: str, data_dir: Path):
         elif source_id == "codex":
             for f in data_dir.rglob("*.jsonl"):
                 yield f, None
+        elif source_id in WHOLE_FILE_PARSERS:
+            yield from editor_rows.session_files(source_id, data_dir, listed)
         else:
             # Gemini CLI writes .jsonl. The old glob asked for .json and matched
             # nothing, which is why this source silently reported no sessions.
@@ -169,13 +173,19 @@ def session_files(source_id: str, data_dir: Path):
         log.warning("Could not walk %s: %s", data_dir, e)
 
 
-def _row_for(source_id: str, f: Path, project_dir) -> tuple | None:
+def _row_for(source_id: str, f: Path, project_dir, folders: dict | None = None,
+             subs: dict | None = None) -> tuple | None:
     info = scan_session(f, source_id)
     if info is None:
         return None
 
     parent = None
-    if source_id == "claude-code":
+    if source_id in WHOLE_FILE_PARSERS:
+        project_id, project_name, parent, sub_count = editor_rows.project_for(
+            source_id, f, project_dir, info, folders or {}, subs or {})
+        if sub_count is not None:
+            info["subagent_count"] = sub_count
+    elif source_id == "claude-code":
         project_id = project_dir.name
         # The directory name is a lossy hash — Claude Code collapses "/", "_"
         # and "-" all into "-" — so the recorded cwd is authoritative.
@@ -256,8 +266,18 @@ def _refresh_one(sid: str, data_dir: Path, force: bool) -> dict:
         conn.execute("DELETE FROM sessions WHERE source=?", (sid,))
         conn.commit()
 
+    # Cursor rows depend on other files: a transcript takes its project's folder
+    # from the store exports, and a chat's sub-agent count from transcripts.
+    # Both maps are built once per refresh, then re-applied to unchanged rows.
+    folders = subs = None
+    if sid == "cursor":
+        folders = editor_rows.slug_folders(data_dir)
+        subs = editor_rows.subagent_counts(data_dir)
+
     seen, batch, changed = set(), [], 0
-    for f, project_dir in session_files(sid, data_dir):
+    has_row: set = set()          # paths that end this pass with a row
+    stale_rows: list = []
+    for f, project_dir in session_files(sid, data_dir, lambda p: str(p) in has_row):
         key = str(f)
         seen.add(key)
         try:
@@ -266,20 +286,28 @@ def _refresh_one(sid: str, data_dir: Path, force: bool) -> dict:
             continue
         prev = known.get(key)
         if prev and prev[0] == st.st_size and prev[1] == st.st_mtime:
+            has_row.add(key)
             continue                                  # unchanged
-        row = _row_for(sid, f, project_dir)
+        row = _row_for(sid, f, project_dir, folders, subs)
         if row:
             batch.append(row)
+            has_row.add(key)
             changed += 1
+        elif prev and sid in WHOLE_FILE_PARSERS:
+            # A chat that now yields nothing (emptied) must not keep its old
+            # row — it would also keep hiding the transcript copy of the chat.
+            stale_rows.append(key)
         if len(batch) >= 500:
             _flush(conn, batch)
             batch = []
 
     _flush(conn, batch)
 
-    gone = [p for p in known if p not in seen]
+    gone = [p for p in known if p not in seen] + stale_rows
     if gone:
         conn.executemany("DELETE FROM sessions WHERE path=?", [(p,) for p in gone])
+    if sid == "cursor":
+        editor_rows.refresh_derived(conn, data_dir, folders, subs)
     conn.commit()
 
     counts = conn.execute(
@@ -318,7 +346,8 @@ def is_ready(source_id: str) -> bool:
 
 def entry_for_session(source_id: str, project_id: str, session_id: str) -> dict | None:
     r = connect().execute(
-        "SELECT * FROM sessions WHERE source=? AND project_id=? AND session_id=? LIMIT 1",
+        "SELECT * FROM sessions WHERE source=? AND project_id=? AND session_id=? "
+        "ORDER BY mtime DESC LIMIT 1",
         (source_id, project_id, session_id)).fetchone()
     return _row_to_entry(r) if r else None
 
@@ -346,11 +375,22 @@ def sessions_for_project(source_id: str, project_id: str, *, top_level_only: boo
     return [_row_to_listing(r) for r in connect().execute(sql, params)]
 
 
-def subagent_sessions(source_id: str, project_id: str, session_id: str) -> list:
-    return [_row_to_listing(r) for r in connect().execute(
-        f"SELECT {LIST_COLUMNS} FROM sessions WHERE source=? AND project_id=? "
-        f"AND parent_session=? ORDER BY mtime DESC",
-        (source_id, project_id, session_id))]
+def subagent_sessions(source_id: str, project_id: str | None, session_id: str) -> list:
+    """project_id None matches any project: a Cursor chat listed from the store
+    keeps its sub-agents under the transcript's project instead."""
+    sql = f"SELECT {LIST_COLUMNS} FROM sessions WHERE source=? AND parent_session=?"
+    params: list = [source_id, session_id]
+    if project_id is not None:
+        sql += " AND project_id=?"
+        params.append(project_id)
+    return [_row_to_listing(r) for r in connect().execute(sql + " ORDER BY mtime DESC", params)]
+
+
+def path_for_session_id(source_id: str, session_id: str) -> str | None:
+    r = connect().execute("SELECT path FROM sessions WHERE source=? AND session_id=? "
+                          "ORDER BY parent_session IS NOT NULL LIMIT 1",
+                          (source_id, session_id)).fetchone()
+    return r["path"] if r else None
 
 
 def projects_for_source(source_id: str) -> list:
@@ -449,71 +489,6 @@ def summaries_for(source_id: str, keys: list) -> dict:
                 "last_ts": r["last_ts"],
             }
     return out
-
-
-def usage_totals(source_id: str, project_id: str | None = None) -> dict:
-    """Aggregate token usage in SQL rather than in Python."""
-    sql = ("SELECT count(*) sessions, "
-           "COALESCE(sum(u_input),0) i, COALESCE(sum(u_output),0) o, "
-           "COALESCE(sum(u_cache_read),0) cr, COALESCE(sum(u_cache_creation),0) cc "
-           "FROM sessions WHERE source=?")
-    params: list = [source_id]
-    if project_id:
-        sql += " AND project_id=?"
-        params.append(project_id)
-    r = connect().execute(sql, params).fetchone()
-    return {"sessions": r["sessions"], "input": r["i"], "output": r["o"],
-            "cache_read": r["cr"], "cache_creation": r["cc"]}
-
-
-def usage_by(source_id: str, group: str, project_id: str | None = None,
-             limit: int = 400) -> list:
-    """GROUP BY day or project, entirely in SQL."""
-    if group == "day":
-        key = "substr(COALESCE(last_ts, first_ts), 1, 10)"
-    elif group == "project":
-        key = "project_name"
-    else:
-        return []
-    sql = (f"SELECT {key} AS k, count(*) sessions, "
-           f"COALESCE(sum(u_input),0) i, COALESCE(sum(u_output),0) o, "
-           f"COALESCE(sum(u_cache_read),0) cr, COALESCE(sum(u_cache_creation),0) cc "
-           f"FROM sessions WHERE source=?")
-    params: list = [source_id]
-    if project_id:
-        sql += " AND project_id=?"
-        params.append(project_id)
-    sql += f" GROUP BY k ORDER BY {'k DESC' if group == 'day' else '(i+o+cr+cc) DESC'} LIMIT ?"
-    params.append(limit)
-
-    return [{
-        "key": r["k"] or "unknown",
-        "sessions": r["sessions"],
-        "usage": {"input": r["i"], "output": r["o"],
-                  "cache_read": r["cr"], "cache_creation": r["cc"]},
-        "total_tokens": r["i"] + r["o"] + r["cr"] + r["cc"],
-    } for r in connect().execute(sql, params)]
-
-
-def json_counter_totals(source_id: str, column: str, limit: int = 25) -> dict:
-    """Sum the small JSON counter columns (models, tools) by streaming."""
-    if column not in ("models", "tools"):
-        return {}
-    totals: dict = {}
-    cur = connect().execute(
-        f"SELECT {column} c FROM sessions WHERE source=? AND {column} IS NOT NULL",
-        (source_id,))
-    while True:
-        rows = cur.fetchmany(500)
-        if not rows:
-            break
-        for r in rows:
-            try:
-                for name, n in json.loads(r["c"]).items():
-                    totals[name] = totals.get(name, 0) + n
-            except (json.JSONDecodeError, AttributeError):
-                continue
-    return dict(sorted(totals.items(), key=lambda kv: -kv[1])[:limit])
 
 
 def estimated_db_bytes() -> int:

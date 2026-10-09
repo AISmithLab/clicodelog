@@ -41,9 +41,9 @@ def load_json(path: Path, default):
     if not path.exists():
         return default
     try:
-        with open(path, "r") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         quarantine(path)
         return default
     except OSError:
@@ -65,12 +65,22 @@ def write_json(path: Path, data, *, keep_backup: bool = False, indent: int | Non
         except OSError:
             log.warning("Could not refresh backup for %s", path, exc_info=True)
 
+    return write_text_atomic(path, json.dumps(data, indent=indent))
+
+
+def write_text_atomic(path: Path, text: str) -> bool:
+    """Atomically write UTF-8 text to path (temp file, fsync, os.replace).
+
+    The encoding is explicit: without it Python uses the locale's, which on
+    Windows is cp1252 — non-Latin text then fails to write at all.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = None
     try:
         # Same directory, so os.replace stays on one filesystem and is atomic.
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, indent=indent)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_name, path)
@@ -85,6 +95,24 @@ def write_json(path: Path, data, *, keep_backup: bool = False, indent: int | Non
                 os.unlink(tmp_name)   # our own temp file only, never user data
             except OSError:
                 pass
+
+
+def keep_superseded(path: Path) -> Path | None:
+    """Copy path to <stem>.superseded-<time>.bak before it is overwritten by a
+    version that has lost content. Never replaces an earlier preserved copy.
+    Returns the copy, or None if it could not be made (the caller must then
+    leave path untouched)."""
+    stamp, n = datetime.now().strftime("%Y%m%d-%H%M%S"), 0
+    keep = path.with_name(f"{path.stem}.superseded-{stamp}.bak")
+    while keep.exists():
+        n += 1
+        keep = path.with_name(f"{path.stem}.superseded-{stamp}-{n}.bak")
+    try:
+        shutil.copy2(path, keep)
+        return keep
+    except OSError:
+        log.warning("Could not preserve %s before overwriting it", path, exc_info=True)
+        return None
 
 
 def has_free_space(path: Path, needed_bytes: int, *, margin: float = 1.2) -> tuple[bool, int]:

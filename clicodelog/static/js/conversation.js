@@ -22,7 +22,7 @@ function resumeCommand(conv) {
     if (currentSource === 'codex') {
         return (cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '') + 'codex resume ' + id;
     }
-    return null;   // Gemini CLI has no id-based resume
+    return null;   // Gemini CLI, Cursor and VS Code chats have no id-based CLI resume
 }
 
 function sessionCwd() {
@@ -33,7 +33,11 @@ function sessionCwd() {
 }
 
 function shellQuote(s) {
-    return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : "'" + s.replace(/'/g, "'\\''") + "'";
+    if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s;
+    // A Windows path (c:\src, \\server\share) goes to cmd/PowerShell, which
+    // do not understand POSIX single quotes.
+    if (/^[A-Za-z]:[\\/]|^\\\\/.test(s)) return '"' + s.replace(/"/g, '') + '"';
+    return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
 function buildSessionActions(conv) {
@@ -55,7 +59,8 @@ function buildSessionActions(conv) {
         var open = document.createElement('button');
         open.className = 'action-chip';
         open.textContent = 'Copy editor command';
-        var editor = localStorage.getItem('clicodelog-editor') || 'code';
+        var editor = localStorage.getItem('clicodelog-editor') ||
+            (currentSource === 'cursor' ? 'cursor' : 'code');
         var openCmd = editor + ' ' + shellQuote(cwd);
         open.title = openCmd;
         open.onclick = function() { copyToClipboard(openCmd, open, 'Copied'); };

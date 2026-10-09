@@ -57,9 +57,25 @@ GEMINI_LINES = [
 ]
 
 
+# VS Code Copilot Chat's mutation log: initial state, then a pushed request.
+VSCODE_LINES = [
+    {"kind": 0, "v": {"version": 3, "sessionId": "chat-1", "requests": []}},
+    {"kind": 2, "k": ["requests"], "v": [{
+        "requestId": "r1", "timestamp": 1770339125297, "message": {"text": "explain this"},
+        "response": [{"value": "It parses JSON."}]}]},
+]
+
+# Cursor agent transcript.
+CURSOR_LINES = [
+    {"role": "user", "message": {"content": [
+        {"type": "text", "text": "<user_query>\nwhy is this slow\n</user_query>"}]}},
+    {"role": "assistant", "message": {"content": [{"type": "text", "text": "It re-parses."}]}},
+]
+
+
 def _write_jsonl(path, records):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
 
 
 @pytest.fixture
@@ -70,6 +86,12 @@ def fake_data(tmp_path, monkeypatch):
     _write_jsonl(root / "codex" / "2026" / "08" / "rollout-1.jsonl", CODEX_LINES)
     _write_jsonl(root / "gemini" / "my_app" / "chats" / "session-2026-08-01.jsonl",
                  GEMINI_LINES)
+    vs = root / "vscode" / "abc123"
+    vs.mkdir(parents=True)
+    (vs / "workspace.json").write_text(json.dumps({"folder": "file:///Users/x/my_app"}), encoding="utf-8")
+    _write_jsonl(vs / "chatSessions" / "chat-1.jsonl", VSCODE_LINES)
+    _write_jsonl(root / "cursor" / "transcripts" / "Users-x-my-app" / "t1" / "t1.jsonl",
+                 CURSOR_LINES)
 
     monkeypatch.setattr("clicodelog.config.DATA_DIR", root)
     monkeypatch.setattr("clicodelog.metastore.DATA_DIR", root)
@@ -88,7 +110,7 @@ def fake_data(tmp_path, monkeypatch):
         del metastore._local.conn
 
 
-@pytest.mark.parametrize("source_id", ["claude-code", "codex", "gemini"])
+@pytest.mark.parametrize("source_id", ["claude-code", "codex", "gemini", "vscode", "cursor"])
 def test_source_yields_at_least_one_session(fake_data, source_id):
     """The contract every source must meet, and the one Gemini silently broke."""
     result = search_index.refresh_index(source_id)
@@ -153,7 +175,7 @@ def test_torn_final_line_does_not_break_a_session(tmp_path):
     """Sync copies files while the agent is still writing them."""
     p = tmp_path / "torn.jsonl"
     good = "\n".join(json.dumps(r) for r in CLAUDE_LINES)
-    p.write_text(good + '\n{"type": "assistant", "message": {"cont')
+    p.write_text(good + '\n{"type": "assistant", "message": {"cont', encoding="utf-8")
     info = scan_session(p, "claude-code")
     assert info is not None
     assert info["message_count"] == 2
@@ -161,7 +183,7 @@ def test_torn_final_line_does_not_break_a_session(tmp_path):
 
 def test_non_dict_line_is_skipped(tmp_path):
     p = tmp_path / "odd.jsonl"
-    p.write_text("null\n42\n" + json.dumps(CLAUDE_LINES[1]) + "\n")
+    p.write_text("null\n42\n" + json.dumps(CLAUDE_LINES[1]) + "\n", encoding="utf-8")
     info = scan_session(p, "claude-code")
     assert info is not None and info["message_count"] == 1
 

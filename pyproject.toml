@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clicodelog"
 version = "0.2.3"
-description = "A lightweight, local-first web app to browse, inspect, and export logs from CLI-based AI coding agents"
+description = "A lightweight, local-first web app to browse, inspect, and export logs from AI coding agents and editors (Claude Code, Codex, Gemini CLI, Cursor, VS Code Copilot Chat)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -19,6 +19,9 @@ keywords = [
     "codex",
     "gemini",
     "gemini-cli",
+    "cursor",
+    "vscode",
+    "copilot",
     "ai",
     "log",
     "viewer",

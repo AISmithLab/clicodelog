@@ -1,5 +1,6 @@
 import ctypes
 import ctypes.util
+import importlib
 import os
 import shutil
 import sys
@@ -146,8 +147,9 @@ def sync_data(source_id: str | None = None, silent: bool = False,
     source_config = SOURCES[source_id]
     source_dir = source_config["source_dir"]
     dest_dir = DATA_DIR / source_config["data_subdir"]
+    syncer = source_config.get("syncer")
 
-    if not source_dir.exists():
+    if not syncer and not source_dir.exists():
         log.info("Source directory not found: %s", source_dir)
         return False
 
@@ -160,7 +162,15 @@ def sync_data(source_id: str | None = None, silent: bool = False,
     with sync_lock:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         log.info("Syncing %s from %s", source_config["name"], source_dir)
-        _additive_copy(source_dir, dest_dir, stats)
+        if syncer:
+            # Editors keep chats inside a much larger state tree (and Cursor in
+            # SQLite), so their modules pick out just the history.
+            module = importlib.import_module(f".{syncer}", __package__)
+            if not module.sync(dest_dir, stats, _additive_copy):
+                log.info("%s: no data found on this machine", source_config["name"])
+                return False
+        else:
+            _additive_copy(source_dir, dest_dir, stats)
 
     last_sync_time[source_id] = datetime.now()
 

@@ -7,10 +7,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Editor data lives in a different place on each OS (and Windows defaults
+    # to a non-UTF-8 text encoding), so every platform runs the suite.
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.12"]
 
     steps:
@@ -25,14 +28,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # A text file opened without encoding= uses the locale's, which on
+      # Windows is cp1252. Making that an error catches it on every OS.
       - name: Run tests
-        run: python -m pytest tests/ -q
+        env:
+          PYTHONWARNDEFAULTENCODING: "1"
+        run: python -W error::EncodingWarning -m pytest tests/ -q
 
       # The wheel is built and inspected because the packaging bug that shipped
       # for months was invisible to an editable install: static/js/vendor/ was
       # excluded from every published wheel, so markdown rendering and syntax
       # highlighting silently degraded for anyone installing from PyPI.
       - name: Verify the wheel actually contains its assets
+        shell: bash
         run: |
           python -m build --wheel --outdir dist/
           python - <<'PY'

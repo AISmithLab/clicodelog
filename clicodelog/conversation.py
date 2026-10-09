@@ -7,14 +7,14 @@ the browser had to parse in one shot before rendering anything, most of it tool
 output the viewer never displays.
 """
 
+import glob
 import threading
 from collections import OrderedDict
 from pathlib import Path
 
 from .config import DATA_DIR, SOURCES
 from .logging_setup import get_logger
-from .parsers import (parse_claude_conversation, parse_codex_conversation,
-                      parse_gemini_conversation)
+from .parsers import PARSERS, WHOLE_FILE_PARSERS
 from .utils import decode_path_id, is_safe_id, safe_child
 
 log = get_logger(__name__)
@@ -92,6 +92,9 @@ def _find_session_file(data_dir: Path, project_id: str, session_id: str, source_
                 return f
         return None
 
+    if source_id in WHOLE_FILE_PARSERS:
+        return _find_editor_file(data_dir, project_id, session_id, source_id)
+
     # gemini — files are .jsonl and grouped by their directory
     project_dir = safe_child(data_dir, project_id)
     if project_dir is not None:
@@ -99,6 +102,42 @@ def _find_session_file(data_dir: Path, project_id: str, session_id: str, source_
         if direct.is_file():
             return direct
     for f in data_dir.rglob(f"chats/{session_id}.jsonl"):
+        return f
+    return None
+
+
+def _find_editor_file(data_dir: Path, project_id: str, session_id: str, source_id: str):
+    """The index knows the path; a Cursor sub-agent may sit under a different
+    project than the chat it is opened from, so fall back to the id alone."""
+    from . import search_index as _idx
+    entry = _idx.entry_for_session(source_id, project_id, session_id)
+    candidate = entry["full_path"] if entry else None
+    if candidate is None and source_id == "vscode":
+        # A VS Code chat lives under its own workspace; never serve another
+        # workspace's copy of the same id (Code and Insiders can share one).
+        ws = safe_child(data_dir, project_id)
+        for ext in (".jsonl", ".json"):
+            if ws is not None and (ws / "chatSessions" / f"{session_id}{ext}").is_file():
+                return ws / "chatSessions" / f"{session_id}{ext}"
+        return None
+    if candidate is None:
+        candidate = _idx.path_for_session_id(source_id, session_id)
+    if candidate:
+        p = Path(candidate)
+        try:
+            p.resolve().relative_to(data_dir.resolve())
+        except (ValueError, OSError):
+            return None
+        if p.is_file():
+            return p
+    if source_id == "vscode":
+        return None
+    # The id is matched literally: "*" or "[" in it must not act as a wildcard.
+    name = glob.escape(session_id) + ".jsonl"
+    for kind in ("composers", "cli"):
+        for f in (data_dir / kind).glob(f"*/{name}"):
+            return f
+    for f in (data_dir / "transcripts").rglob(name):
         return f
     return None
 
@@ -159,12 +198,7 @@ def get_conversation(project_id: str, session_id: str, source_id: str,
 
     if conv is None:
         try:
-            if source_id == "claude-code":
-                conv = parse_claude_conversation(session_file, session_id)
-            elif source_id == "codex":
-                conv = parse_codex_conversation(session_file, session_id)
-            else:
-                conv = parse_gemini_conversation(session_file, session_id)
+            conv = PARSERS[source_id](session_file, session_id)
         except Exception:
             # A file copied mid-write can be truncated. Say so instead of 500ing.
             log.exception("Failed to parse %s", session_file)

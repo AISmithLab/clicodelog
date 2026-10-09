@@ -8,7 +8,7 @@ def parse_codex_conversation(session_file: Path, session_id: str) -> dict:
     summaries = []
     session_meta = {}
 
-    with open(session_file, "r") as f:
+    with open(session_file, "r", encoding="utf-8", errors="replace") as f:
         for line_num, line in enumerate(f):
             try:
                 entry = json.loads(line)

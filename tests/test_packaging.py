@@ -59,7 +59,7 @@ def test_every_referenced_static_file_is_packaged(wheel):
     names = set(zipfile.ZipFile(wheel).namelist())
     referenced = set()
     for tpl in (REPO / "clicodelog" / "templates").glob("*.html"):
-        text = tpl.read_text()
+        text = tpl.read_text(encoding="utf-8")
         referenced |= set(re.findall(r'(?:src|href)="/static/([^"?]+)', text))
 
     missing = [

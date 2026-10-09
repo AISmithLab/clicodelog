@@ -44,7 +44,7 @@ def safe_child(base: Path, *parts: str) -> Path | None:
 def get_codex_cwd(session_file) -> str | None:
     """Extract cwd from a Codex session file for project grouping."""
     try:
-        with open(session_file, "r", errors="ignore") as f:
+        with open(session_file, "r", encoding="utf-8", errors="ignore") as f:
             for _ in range(50):
                 line = f.readline()
                 if not line:
@@ -70,7 +70,7 @@ def get_gemini_project_hash(session_file) -> str | None:
     raised on every current file, which is part of why this source went dark.
     """
     try:
-        with open(session_file, "r", errors="ignore") as f:
+        with open(session_file, "r", encoding="utf-8", errors="ignore") as f:
             for _ in range(5):
                 line = f.readline()
                 if not line:

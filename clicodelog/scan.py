@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .logging_setup import get_logger
+from .parsers import WHOLE_FILE_PARSERS
 
 log = get_logger(__name__)
 
@@ -258,11 +259,20 @@ def _read_gemini_line(entry: dict, state: dict, header: dict) -> None:
 # --------------------------------------------------------------------------- driver
 def scan_session(path: Path, source_id: str) -> dict | None:
     """Read one session file and return everything the app needs about it."""
+    if source_id in WHOLE_FILE_PARSERS:     # read through their parser instead
+        try:
+            st = path.stat()
+        except OSError as e:
+            log.warning("Could not read %s: %s", path, e)
+            return None
+        from .scan_parsed import scan_parsed
+        return scan_parsed(path, source_id, st)
+
     state = _new_state()
     header: dict = {}
     try:
         st = path.stat()
-        with open(path, "r", errors="ignore") as fh:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
                 if not line.strip():
                     continue
@@ -277,7 +287,7 @@ def scan_session(path: Path, source_id: str) -> dict | None:
                         _read_claude(entry, state)
                     elif source_id == "codex":
                         _read_codex(entry, state)
-                    else:
+                    elif source_id == "gemini":
                         _read_gemini_line(entry, state, header)
                 except (AttributeError, TypeError):
                     continue                       # unexpected shape; skip the line

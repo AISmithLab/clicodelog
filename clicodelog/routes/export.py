@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Optional
 
 from fastapi import APIRouter
@@ -121,6 +122,42 @@ def _build_text(session_id: str, label: str, conv: dict):
     return "\n".join(lines), "text/plain", "txt"
 
 
+def _fence(body: str) -> str:
+    """A code fence longer than any backtick run in body.
+
+    Tool output is often itself markdown — an agent reading a README — and a
+    line of ``` inside it closed a fixed ``` fence early, spilling the rest of
+    the export out of its code block (93 of 153 Copilot exports here).
+    """
+    longest = max((len(m) for m in re.findall(r"`+", body)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _closed(text: str) -> str:
+    """text, plus a closing fence if it leaves a code block open.
+
+    Model output is not always well-formed — a reply cut off at a length limit
+    stops mid-block — and in an export one open fence swallows every turn after
+    it. Follows CommonMark: a fence closes only with the same character, at
+    least as many of them, and nothing else on the line.
+    """
+    open_fence = None
+    for line in text.split("\n"):
+        m = _FENCE_LINE.match(line)
+        if not m:
+            continue
+        run, rest = m.group(1), m.group(2)
+        if open_fence is None:
+            if not (run[0] == "`" and "`" in rest):     # ``` x ` y is not a fence
+                open_fence = run
+        elif run[0] == open_fence[0] and len(run) >= len(open_fence) and not rest.strip():
+            open_fence = None
+    return text if open_fence is None else f"{text}\n{open_fence}"
+
+
 def _build_markdown(session_id: str, label: str, conv: dict):
     """Markdown export — the format people actually paste into issues and PRs.
 
@@ -146,21 +183,24 @@ def _build_markdown(session_id: str, label: str, conv: dict):
             out += [f"<sub>{stamp}</sub>", ""]
 
         if msg.get("content"):
-            out += [msg["content"], ""]
+            out += [_closed(msg["content"]), ""]
 
         if msg.get("thinking"):
             out += ["<details><summary>Thinking</summary>", "",
-                    msg["thinking"], "", "</details>", ""]
+                    _closed(msg["thinking"]), "", "</details>", ""]
 
         for tool in msg.get("tool_uses") or []:
             out.append(f"<details><summary>Tool: <code>{tool['name']}</code></summary>")
             out.append("")
             inp = tool.get("input")
-            out += ["**Input**", "", "```json",
-                    json.dumps(inp, indent=2, ensure_ascii=False)
-                    if isinstance(inp, (dict, list)) else str(inp), "```", ""]
+            body = (json.dumps(inp, indent=2, ensure_ascii=False)
+                    if isinstance(inp, (dict, list)) else str(inp))
+            fence = _fence(body)
+            out += ["**Input**", "", fence + "json", body, fence, ""]
             if tool.get("result"):
-                out += ["**Output**", "", "```", str(tool["result"])[:200_000], "```", ""]
+                body = str(tool["result"])[:200_000]
+                fence = _fence(body)
+                out += ["**Output**", "", fence, body, fence, ""]
             out += ["</details>", ""]
 
         total += _total_tokens(msg.get("usage") or {})

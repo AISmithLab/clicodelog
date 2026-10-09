@@ -8,8 +8,9 @@
 <h3>Your AI coding agent just edited 30 files across 6 directories.<br>What actually happened?</h3>
 
 <p>
-Browse every session from Claude Code, OpenAI Codex, and Gemini CLI
-the thinking, the tool calls, the file changes, the token costs.
+Browse every session from Claude Code, OpenAI Codex, Gemini CLI, Cursor and
+VS Code (GitHub Copilot Chat) — the thinking, the tool calls, the file changes,
+the token costs. On macOS, Windows and Linux.
 All in one local interface. Nothing leaves your machine.
 </p>
 
@@ -67,6 +68,10 @@ A big round of performance, search and correctness work. Highlights:
 
 <table>
 <tr>
+<td>🧩</td>
+<td><b>Cursor and VS Code support</b><br>Cursor chats and agent transcripts and VS Code GitHub Copilot Chat sessions are backed up, browsable, searchable and exportable, the same as the CLI agents. Each editor is found in its standard location on macOS, Windows and Linux.</td>
+</tr>
+<tr>
 <td>🔎</td>
 <td><b>Full-text search inside conversations</b><br>Search what was actually said and done, not just session titles — powered by SQLite FTS5 with ranked results, highlighted snippets, and a click straight to the matching message. Opt-in, and it shows the index size before building.</td>
 </tr>
@@ -112,49 +117,22 @@ A big round of performance, search and correctness work. Highlights:
 </tr>
 </table>
 
-> **Upgrading from PyPI?** Markdown rendering and syntax highlighting were silently broken
-> in earlier published versions — the packaged wheel was missing its bundled JavaScript.
-> Fixed, and now guarded by a test.
-
-
-
-
 ## Installation
 
-### Via uv tool (Recommended)
-
-[uv](https://github.com/astral-sh/uv) is a fast Python package installer. Install it first if you haven't:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-Then install clicodelog as an isolated tool:
-
-```bash
-uv tool install clicodelog
-```
-
-To upgrade:
-```bash
-uv tool upgrade clicodelog
-```
-
-### Via pip
-
-```bash
-pip install clicodelog
-```
-
-### From source
+clicodelog is installed from source. It needs Python 3.10+ and works the same on
+macOS, Windows and Linux.
 
 ```bash
 git clone https://github.com/monk1337/clicodelog.git
 cd clicodelog
-uv tool install -e .
-# or with pip:
+uv tool install -e .       # puts the `clicodelog` command on your PATH
+# or, inside a virtualenv:
 pip install -e .
 ```
+
+The install is editable, so `git pull` is all an upgrade takes. Without
+installing anything, `uv run python -m clicodelog.cli` runs it straight from the
+checkout.
 
 ---
 
@@ -181,14 +159,6 @@ clicodelog --no-sync            # Skip initial data sync
 clicodelog --debug              # Run in debug mode
 ```
 
-### Alternative: Run from source
-
-```bash
-git clone https://github.com/monk1337/clicodelog.git
-cd clicodelog
-python -m clicodelog.cli
-```
-
 ## Why Developers Use It
 
 <table>
@@ -206,7 +176,7 @@ python -m clicodelog.cli
 </tr>
 <tr>
 <td>🔀</td>
-<td><b>All your agents, one place</b><br>Claude Code, Codex, and Gemini CLI side by side. Same interface, same workflow, no context switching.</td>
+<td><b>All your agents, one place</b><br>Claude Code, Codex, Gemini CLI, Cursor and VS Code Copilot Chat side by side. Same interface, same workflow, no context switching.</td>
 </tr>
 <tr>
 <td>🔒</td>
@@ -223,6 +193,25 @@ python -m clicodelog.cli
 | **Claude Code** | `~/.claude/projects/` | ✅ Supported |
 | **OpenAI Codex** | `~/.codex/sessions/` | ✅ Supported |
 | **Gemini CLI** | `~/.gemini/tmp/` | ✅ Supported |
+| **Cursor** (IDE + `cursor-agent` CLI) | Cursor's user dir (see below), `~/.cursor/projects/*/agent-transcripts/`, `~/.cursor/chats/` | ✅ Supported |
+| **VS Code** (GitHub Copilot Chat) | VS Code's user dir (see below) | ✅ Supported |
+
+Cursor and VS Code keep their data in the editor's per-OS user directory:
+
+| OS | VS Code | Cursor |
+|----|---------|--------|
+| macOS | `~/Library/Application Support/Code/User` | `~/Library/Application Support/Cursor/User` |
+| Windows | `%APPDATA%\Code\User` | `%APPDATA%\Cursor\User` |
+| Linux | `~/.config/Code/User` (or `$XDG_CONFIG_HOME`) | `~/.config/Cursor/User` |
+
+VS Code Insiders (`Code - Insiders`) and VSCodium are picked up as well. For a
+portable install or an unusual profile location, point clicodelog at it with
+`CLICODELOG_VSCODE_USER_DIRS`, `CLICODELOG_CURSOR_USER_DIRS` (each a list
+separated by `:`, or `;` on Windows), `CLICODELOG_CURSOR_PROJECTS_DIR` or
+`CLICODELOG_CURSOR_CLI_DIR`. Cursor's own `CURSOR_CONFIG_DIR` is honoured too.
+
+`CLICODELOG_HOME` moves clicodelog's own data (backup, indexes, bookmarks; by
+default `~/.clicodelog`), e.g. to run a second instance next to your usual one.
 
 ### Claude Code
 
@@ -244,6 +233,39 @@ python -m clicodelog.cli
 - Displays messages, thoughts (thinking), and tool calls
 - Shows token usage (input, output, cached)
 
+### Cursor
+
+Cursor keeps history in three places, and all of them are backed up:
+
+- **The chat store** — `state.vscdb` (SQLite) in Cursor's user dir. This is the
+  complete record: timestamps, model, token counts, thinking and tool output.
+  It's read through a read-only connection (Cursor's database is never written),
+  and each chat is saved as its own file in the backup. The older inline-composer
+  and "aichat" formats are read too.
+- **Agent transcripts** — the JSONL files Cursor writes under
+  `~/.cursor/projects/<project>/agent-transcripts/`, sub-agents included. These
+  are copied as they are.
+- **The `cursor-agent` CLI** — one SQLite `store.db` per chat under
+  `~/.cursor/chats/<workspace>/<chat>/`, with a `meta.json` naming its folder.
+  Each chat is exported read-only, binary rows included, so the backup stays
+  complete. Prompts, replies, reasoning, tool calls and their output are shown.
+  Sub-agent runs are backed up but not listed.
+
+A chat that appears in both is listed once, from the store, because it has more
+detail. Chats are grouped by workspace folder. If you edit an earlier prompt,
+Cursor drops every message after it; when that happens the previous copy is kept
+next to the new one as `<id>.superseded-<time>.bak`.
+
+### VS Code (GitHub Copilot Chat)
+
+- Reads `workspaceStorage/<hash>/chatSessions/*.json` (older format) and
+  `*.jsonl` (the current mutation-log format), plus chats from windows with no
+  folder open
+- Only chat files are copied; the rest of the editor's state is skipped
+- Groups chats by workspace folder, including Remote-SSH and WSL folders
+- Displays messages, thinking, tool calls with their exact arguments and
+  output, file edits, model and token usage
+
 ---
 
 ### CLI Options
@@ -263,10 +285,10 @@ clicodelog --debug              # Run in debug mode
 
 ## How It Works
 
-- **Startup sync** — Copies logs from source directories into local `./data/`
+- **Startup sync** — Copies logs from source directories into `~/.clicodelog/data/`
 - **Background sync** — Automatically refreshes every hour
 - **Manual sync** — Trigger a sync for the active source via UI
-- **Source switching** — Switch between Claude Code, Codex, and Gemini CLI
+- **Source switching** — Switch between Claude Code, Codex, Gemini CLI, Cursor and VS Code
 
 ---
 
@@ -285,12 +307,27 @@ data/
 │           ├── 16/
 │           │   └── rollout-xxx.jsonl
 │           └── 17/
-└── gemini/               # Gemini CLI backup
-    ├── {project-hash-1}/
-    │   └── chats/
-    │       ├── session-2026-01-17T12-57-xxx.json
-    │       └── session-2026-01-17T13-04-xxx.json
-    └── {project-hash-2}/
+├── gemini/               # Gemini CLI backup
+│   ├── {project-hash-1}/
+│   │   └── chats/
+│   │       ├── session-2026-01-17T12-57-xxx.json
+│   │       └── session-2026-01-17T13-04-xxx.json
+│   └── {project-hash-2}/
+├── cursor/               # Cursor backup
+│   ├── composers/
+│   │   └── {workspace-hash}/
+│   │       └── {chat-id}.jsonl      # one chat exported from state.vscdb
+│   ├── cli/
+│   │   └── {workspace-hash}/
+│   │       └── {chat-id}.jsonl      # one cursor-agent CLI chat
+│   └── transcripts/
+│       └── {project-slug}/
+│           └── {id}/{id}.jsonl      # agent transcript (+ subagents/)
+└── vscode/               # VS Code Copilot Chat backup
+    └── {workspace-hash}/
+        ├── workspace.json
+        └── chatSessions/
+            └── {session-id}.jsonl
 ```
 
 ---
@@ -328,7 +365,10 @@ clicodelog/
 ├── window.py           # Windowed reads of huge sessions
 ├── conversation.py     # Conversation loading + pagination
 ├── storage.py          # Atomic writes, disk checks
-├── parsers/            # claude.py, codex.py, gemini.py
+├── editors.py          # Per-OS editor locations, URI decoding
+├── sync_cursor.py      # Cursor: store export + transcript copy
+├── sync_vscode.py      # VS Code: copies chatSessions only
+├── parsers/            # claude, codex, gemini, cursor, vscode
 ├── routes/             # projects, search, export, sync, sources, stats
 ├── static/             # Vanilla JS + CSS (no build step)
 └── templates/          # index.html, view.html
@@ -419,7 +459,7 @@ Then wire up the rest:
     author       = {Pal, Ankit},                                                                                                                                             
     year         = {2026},
     howpublished = {\url{https://github.com/monk1337/clicodelog}},                                                                                                           
-    note         = {Local web UI for browsing Claude Code, OpenAI Codex, and Gemini CLI session logs - thinking blocks, tool calls, file edits, and token costs}             
+    note         = {Local web UI for browsing Claude Code, OpenAI Codex, Gemini CLI, Cursor and VS Code Copilot Chat session logs - thinking blocks, tool calls, file edits, and token costs}             
   }       
 ```
 ---

@@ -101,7 +101,8 @@ def free_port(host: str, port: int) -> bool:
             if _port_is_free(host, port):
                 return True
         try:
-            os.kill(pid, signal.SIGKILL)          # only a confirmed stale instance
+            # Windows has no SIGKILL; there os.kill with SIGTERM is already a hard stop.
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except (ProcessLookupError, PermissionError):
             pass
 
