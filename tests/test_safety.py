@@ -17,7 +17,7 @@ from clicodelog.utils import decode_path_id, encode_path_id, is_safe_id, safe_ch
 def test_write_json_is_atomic_and_leaves_no_temp_files(tmp_path):
     target = tmp_path / "bookmarks.json"
     assert storage.write_json(target, [{"id": "a"}])
-    assert json.loads(target.read_text()) == [{"id": "a"}]
+    assert json.loads(target.read_text(encoding="utf-8")) == [{"id": "a"}]
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
 
 
@@ -25,14 +25,14 @@ def test_corrupt_file_is_quarantined_not_silently_emptied(tmp_path):
     """The old code returned [] on a decode error and then saved that empty list
     back, permanently destroying every bookmark. The data must survive."""
     target = tmp_path / "bookmarks.json"
-    target.write_text('[{"id": "important"}, {"id": "trunca')
+    target.write_text('[{"id": "important"}, {"id": "trunca', encoding="utf-8")
 
     result = storage.load_json(target, [])
 
     assert result == []                       # caller still gets a usable default
     quarantined = list(tmp_path.glob("bookmarks.json.corrupt-*"))
     assert quarantined, "corrupt file must be preserved, not discarded"
-    assert "important" in quarantined[0].read_text()
+    assert "important" in quarantined[0].read_text(encoding="utf-8")
     assert not target.exists()                # so a later save cannot clobber it
 
 
@@ -42,7 +42,7 @@ def test_backup_copy_is_kept(tmp_path):
     storage.write_json(target, [{"id": "second"}], keep_backup=True)
     bak = tmp_path / "bookmarks.json.bak"
     assert bak.exists()
-    assert json.loads(bak.read_text()) == [{"id": "first"}]
+    assert json.loads(bak.read_text(encoding="utf-8")) == [{"id": "first"}]
 
 
 def test_concurrent_writes_never_produce_a_partial_file(tmp_path):
@@ -64,7 +64,7 @@ def test_concurrent_writes_never_produce_a_partial_file(tmp_path):
         t.join()
 
     assert not errors
-    loaded = json.loads(target.read_text())         # must always parse
+    loaded = json.loads(target.read_text(encoding="utf-8"))         # must always parse
     assert len(loaded) == 400
 
 
@@ -131,11 +131,11 @@ def test_sync_replaces_files_without_ever_removing_the_original(tmp_path):
 
     src = tmp_path / "src.jsonl"
     dest = tmp_path / "dest.jsonl"
-    src.write_text("new content")
-    dest.write_text("old content")
+    src.write_text("new content", encoding="utf-8")
+    dest.write_text("old content", encoding="utf-8")
 
     assert _place_atomically(src, dest)
-    assert dest.read_text() == "new content"
+    assert dest.read_text(encoding="utf-8") == "new content"
     assert not [p for p in tmp_path.iterdir() if ".tmp-sync" in p.name]
 
 
@@ -146,12 +146,12 @@ def test_sync_never_deletes_files_missing_from_the_source(tmp_path):
     src = tmp_path / "src"
     dest = tmp_path / "dest"
     (src / "keep").mkdir(parents=True)
-    (src / "keep" / "a.jsonl").write_text("a")
+    (src / "keep" / "a.jsonl").write_text("a", encoding="utf-8")
     (dest / "keep").mkdir(parents=True)
-    (dest / "keep" / "pruned-upstream.jsonl").write_text("irreplaceable")
+    (dest / "keep" / "pruned-upstream.jsonl").write_text("irreplaceable", encoding="utf-8")
 
     stats = {"copied": 0, "skipped": 0, "failed": 0, "skipped_no_space": 0}
     _additive_copy(src, dest, stats)
 
-    assert (dest / "keep" / "a.jsonl").read_text() == "a"
-    assert (dest / "keep" / "pruned-upstream.jsonl").read_text() == "irreplaceable"
+    assert (dest / "keep" / "a.jsonl").read_text(encoding="utf-8") == "a"
+    assert (dest / "keep" / "pruned-upstream.jsonl").read_text(encoding="utf-8") == "irreplaceable"

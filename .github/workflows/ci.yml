@@ -28,8 +28,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # A text file opened without encoding= uses the locale's, which on
+      # Windows is cp1252. Making that an error catches it on every OS.
       - name: Run tests
-        run: python -m pytest tests/ -q
+        env:
+          PYTHONWARNDEFAULTENCODING: "1"
+        run: python -W error::EncodingWarning -m pytest tests/ -q
 
       # The wheel is built and inspected because the packaging bug that shipped
       # for months was invisible to an editable install: static/js/vendor/ was

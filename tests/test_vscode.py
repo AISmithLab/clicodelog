@@ -21,8 +21,8 @@ def _sync(env):
 # ------------------------------------------------------------------ formats
 def test_mutation_log_replays_to_the_same_session_as_the_json_form(tmp_path):
     reqs = [vscode_request(0, "a", "b"), vscode_request(1, "c", "d")]
-    (tmp_path / "s.json").write_text(json.dumps(vscode_session("s", reqs)))
-    (tmp_path / "s.jsonl").write_text(vscode_mutation_log("s", reqs))
+    (tmp_path / "s.json").write_text(json.dumps(vscode_session("s", reqs)), encoding="utf-8")
+    (tmp_path / "s.jsonl").write_text(vscode_mutation_log("s", reqs), encoding="utf-8")
     doc, log = load_session(tmp_path / "s.json"), load_session(tmp_path / "s.jsonl")
     assert log["requests"] == doc["requests"], "set/push/push-with-truncate must replay exactly"
     assert log["customTitle"] == "Fix the app"
@@ -31,7 +31,7 @@ def test_mutation_log_replays_to_the_same_session_as_the_json_form(tmp_path):
 
 def test_torn_tail_of_a_mutation_log_keeps_what_replayed(tmp_path):
     p = tmp_path / "s.jsonl"
-    p.write_text(vscode_mutation_log("s", [vscode_request(0, "a", "b")]) + '{"kind": 1, "k": ["cus')
+    p.write_text(vscode_mutation_log("s", [vscode_request(0, "a", "b")]) + '{"kind": 1, "k": ["cus', encoding="utf-8")
     conv = parse_vscode_conversation(p, "s")
     assert [m["role"] for m in conv["messages"]] == ["user", "assistant"]
 
@@ -42,7 +42,7 @@ def test_edit_to_an_unknown_path_is_skipped_not_fatal(tmp_path):
              {"kind": 1, "k": ["requests", 7, "result"], "v": {}},
              {"kind": 2, "k": ["nope", "deeper"], "v": [1]},
              {"kind": 1, "k": ["customTitle"], "v": "still read"}]
-    p.write_text("\n".join(json.dumps(x) for x in lines))
+    p.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
     conv = parse_vscode_conversation(p, "s")
     assert conv["summaries"] == ["still read"]
     assert len(conv["messages"]) == 2
@@ -50,7 +50,7 @@ def test_edit_to_an_unknown_path_is_skipped_not_fatal(tmp_path):
 
 def test_assistant_turn_is_fully_normalised(tmp_path):
     p = tmp_path / "s.json"
-    p.write_text(json.dumps(vscode_session("s", [vscode_request(0, "make x one", "Done.")])))
+    p.write_text(json.dumps(vscode_session("s", [vscode_request(0, "make x one", "Done.")])), encoding="utf-8")
     user, asst = parse_vscode_conversation(p, "s")["messages"]
     assert user == {"role": "user", "content": "make x one",
                     "timestamp": "2026-02-06T00:52:05.297Z", "uuid": "request_0"}
@@ -69,7 +69,7 @@ def test_auto_model_reports_what_actually_ran(tmp_path):
     req = vscode_request(0, "q", "a")
     req["modelId"] = "copilot/auto"
     p = tmp_path / "s.json"
-    p.write_text(json.dumps(vscode_session("s", [req])))
+    p.write_text(json.dumps(vscode_session("s", [req])), encoding="utf-8")
     assert parse_vscode_conversation(p, "s")["messages"][1]["model"] == "Claude Sonnet 4.5"
 
 
@@ -81,7 +81,7 @@ def test_tool_parts_are_used_when_rounds_are_absent(tmp_path):
                             "toolSpecificData": {"kind": "terminal",
                                                  "commandLine": {"original": "pytest -q"}}})
     p = tmp_path / "s.json"
-    p.write_text(json.dumps(vscode_session("s", [req])))
+    p.write_text(json.dumps(vscode_session("s", [req])), encoding="utf-8")
     tools = parse_vscode_conversation(p, "s")["messages"][1]["tool_uses"]
     assert [t["name"] for t in tools] == ["copilot_replaceString", "run_in_terminal"]
     assert tools[1]["input"] == {"command": "pytest -q"}
@@ -163,7 +163,8 @@ def test_full_text_search_and_file_history(isolated):
 
     # A changed file is re-indexed whole, never appended to: no duplicate rows.
     f = isolated["data"] / "vscode" / WS_HASH / "chatSessions" / "sess-log.jsonl"
-    f.write_text(f.read_text() + json.dumps({"kind": 1, "k": ["customTitle"], "v": "Renamed"}) + "\n")
+    f.write_text(f.read_text(encoding="utf-8") + json.dumps({"kind": 1, "k": ["customTitle"], "v": "Renamed"}) + "\n",
+                 encoding="utf-8")
     fts.build_index("vscode")
     hits = [h for h in fts.search_content("日本語", "vscode") if h["session_id"] == "sess-log"]
     assert len(hits[0]["matches"]) == 1
