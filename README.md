@@ -1,6 +1,6 @@
 <div align="center">
   <div align="center">
-<img width="220px" src="https://raw.githubusercontent.com/monk1337/clicodelog/refs/heads/main/screenshots/logo.png">
+<img width="220px" src="https://raw.githubusercontent.com/AISmithLab/clicodelog/refs/heads/main/screenshots/logo.png">
 </div>
 
 <div align="center">
@@ -123,7 +123,7 @@ clicodelog is installed from source. It needs Python 3.10+ and works the same on
 macOS, Windows and Linux.
 
 ```bash
-git clone https://github.com/monk1337/clicodelog.git
+git clone https://github.com/AISmithLab/clicodelog.git
 cd clicodelog
 uv tool install -e .       # puts the `clicodelog` command on your PATH
 # or, inside a virtualenv:

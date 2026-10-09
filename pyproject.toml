@@ -62,9 +62,9 @@ dev = [
 testpaths = ["tests"]
 
 [project.urls]
-Homepage = "https://github.com/monk1337/clicodelog"
-Repository = "https://github.com/monk1337/clicodelog"
-Issues = "https://github.com/monk1337/clicodelog/issues"
+Homepage = "https://github.com/AISmithLab/clicodelog"
+Repository = "https://github.com/AISmithLab/clicodelog"
+Issues = "https://github.com/AISmithLab/clicodelog/issues"
 
 [project.scripts]
 clicodelog = "clicodelog.cli:main"
