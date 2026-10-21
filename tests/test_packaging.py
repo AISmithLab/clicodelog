@@ -23,8 +23,9 @@ VENDOR = ["marked.min.js", "purify.min.js", "highlight.min.js"]
 def wheel(tmp_path_factory):
     out = tmp_path_factory.mktemp("dist")
     try:
+        # Build tools are declared in [dev]; tests need no package downloads.
         subprocess.run(
-            [sys.executable, "-m", "build", "--wheel", "--outdir", str(out)],
+            [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(out)],
             cwd=REPO, check=True, capture_output=True, timeout=600,
         )
     except FileNotFoundError:

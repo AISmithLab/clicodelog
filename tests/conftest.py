@@ -33,6 +33,9 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CLICODELOG_CURSOR_USER_DIRS", str(tmp_path / "cursor-user"))
     monkeypatch.setenv("CLICODELOG_CURSOR_PROJECTS_DIR", str(tmp_path / "cursor-projects"))
     monkeypatch.setenv("CLICODELOG_CURSOR_CLI_DIR", str(tmp_path / "cursor-chats"))
+    monkeypatch.setenv("CLICODELOG_COPILOT_DIR", str(tmp_path / "copilot"))
+    monkeypatch.setenv("CLICODELOG_ANTIGRAVITY_DIRS", str(tmp_path / "antigravity"))
+    monkeypatch.setattr("clicodelog.antigravity_client.discover", lambda: [])
     _reset_conn()
     conversation.clear_cache()
     yield {"root": tmp_path, "data": data,

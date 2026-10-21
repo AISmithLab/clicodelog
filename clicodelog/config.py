@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from .editors import cursor_projects_dir, cursor_user_dirs, first_existing, vscode_user_dirs
+from .agent_paths import antigravity_roots, copilot_sessions_dir
 
 PACKAGE_DIR = Path(__file__).parent
 
@@ -45,6 +46,18 @@ SOURCES = {
         "source_dirs": [d for d, _ in vscode_user_dirs()],
         "data_subdir": "vscode",
         "syncer": "sync_vscode",
+    },
+    "copilot": {
+        "name": "GitHub Copilot CLI",
+        "source_dir": copilot_sessions_dir(),
+        "data_subdir": "copilot",
+        "syncer": "sync_copilot",
+    },
+    "antigravity": {
+        "name": "Google Antigravity",
+        "source_dirs": antigravity_roots(),
+        "data_subdir": "antigravity",
+        "syncer": "sync_antigravity",
     },
 }
 

@@ -1,10 +1,12 @@
 var projectRequestSeq = 0;
+var projectsListRequestSeq = 0;
 
-async function loadSources() {
+async function loadSources(preserveSelection = false) {
+    const sourceAtStart = currentSource;
     try {
         const data = await fetch('/api/sources').then(r => r.json());
         availableSources = data.sources;
-        currentSource = data.current;
+        if (!preserveSelection && currentSource === sourceAtStart) currentSource = data.current;
         const select = document.getElementById('source-select');
         select.textContent = '';
         availableSources.forEach(function(s) {
@@ -14,7 +16,7 @@ async function loadSources() {
             opt.disabled = !s.available;
             var label = s.name;
             if (!s.available) label += ' (not found)';
-            else if (s.warning) label += ' (unreadable)';
+            else if (s.warning) label += ' (needs attention)';
             else if (s.session_count) label += ' (' + s.session_count + ')';
             opt.textContent = label;
             select.appendChild(opt);
@@ -27,6 +29,9 @@ async function loadSources() {
             console.warn('Sources present but unreadable:',
                 broken.map(function(s) { return s.id; }).join(', '));
             showSourceWarning(broken);
+        } else {
+            var warningBar = document.getElementById('source-warning');
+            if (warningBar) warningBar.style.display = 'none';
         }
     } catch (e) { console.error('Error loading sources:', e); }
 }
@@ -34,14 +39,14 @@ async function loadSources() {
 function showSourceWarning(broken) {
     var bar = document.getElementById('source-warning');
     if (!bar) return;
-    bar.textContent = broken.map(function(s) { return s.name; }).join(', ') +
-        ': files found but none could be read. The log format may have changed.';
+    bar.textContent = broken.map(function(s) { return s.name + ': ' + s.warning; }).join(' ');
     bar.style.display = 'block';
 }
 
 async function changeSource(sourceId) {
     if (sourceId === currentSource) return;
     currentSource = sourceId;
+    ++projectRequestSeq;
     currentProjectId = null;
     currentSessionId = null;
     document.getElementById('export-btn').disabled = true;
@@ -60,10 +65,17 @@ async function changeSource(sourceId) {
 }
 
 async function loadProjects() {
+    const sourceAtStart = currentSource;
+    const seq = ++projectsListRequestSeq;
     try {
-        projects = await fetch('/api/projects?source=' + currentSource).then(r => r.json());
+        const data = await fetch('/api/projects?source=' + sourceAtStart).then(r => r.json());
+        if (currentSource !== sourceAtStart || seq !== projectsListRequestSeq) return;
+        projects = data;
         renderProjects(projects);
-    } catch (e) { setPanel('projects-list', emptyState('', 'Error loading projects')); }
+    } catch (e) {
+        if (currentSource === sourceAtStart && seq === projectsListRequestSeq)
+            setPanel('projects-list', emptyState('', 'Error loading projects'));
+    }
 }
 
 function changeProjectSort(mode) {

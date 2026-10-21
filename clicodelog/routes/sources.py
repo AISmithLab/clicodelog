@@ -31,17 +31,23 @@ def api_sources():
         has_files = False
         if data_dir.exists():
             try:
-                has_files = any(data_dir.rglob("*.json*"))
+                has_files = (any((data_dir / "sessions").glob("*.json")) if sid == "antigravity"
+                             else any(data_dir.rglob("*.json*")))
             except OSError:
                 pass
 
+        warning = None
+        if sid == "antigravity":
+            from ..sync_antigravity import source_warning
+            warning = source_warning(data_dir)
+        if not warning and has_files and indexed == 0:
+            warning = "Files are present but none could be read — the log format may have changed."
         out.append({
             "id": sid,
             "name": cfg["name"],
-            "available": any(p.exists() for p in _roots(cfg)),
+            "available": indexed > 0 or any(p.exists() for p in _roots(cfg)),
             "session_count": indexed,
-            "warning": ("Files are present but none could be read — the log format "
-                        "may have changed.") if (has_files and indexed == 0) else None,
+            "warning": warning,
         })
     return {"sources": out, "current": _sync.current_source}
 

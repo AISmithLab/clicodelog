@@ -1,9 +1,10 @@
 async function fetchSyncStatus() {
+    const sourceAtStart = currentSource;
     try {
-        const data = await fetch('/api/status?source=' + currentSource).then(r => r.json());
-        updateSyncStatus(data.last_sync);
+        const data = await fetch('/api/status?source=' + sourceAtStart).then(r => r.json());
+        if (currentSource === sourceAtStart) updateSyncStatus(data.last_sync);
     } catch (e) {
-        document.getElementById('sync-status').textContent = 'Status unavailable';
+        if (currentSource === sourceAtStart) document.getElementById('sync-status').textContent = 'Status unavailable';
     }
 }
 
@@ -19,21 +20,23 @@ function updateSyncStatus(lastSync) {
 }
 
 async function manualSync() {
+    const sourceAtStart = currentSource;
     const btn = document.getElementById('sync-btn');
     btn.classList.add('syncing');
     btn.disabled = true;
     document.getElementById('sync-status').textContent = 'Syncing...';
     try {
-        const data = await fetch('/api/sync?source=' + currentSource, { method: 'POST' }).then(r => r.json());
+        const data = await fetch('/api/sync?source=' + sourceAtStart, { method: 'POST' }).then(r => r.json());
         if (data.status === 'success') {
-            updateSyncStatus(data.last_sync);
+            if (currentSource === sourceAtStart) updateSyncStatus(data.last_sync);
             conversationCache = {};
             if (typeof loadProjects === 'function') await loadProjects();
+            if (typeof loadSources === 'function') await loadSources(true);
         } else {
-            document.getElementById('sync-status').textContent = 'Sync failed';
+            if (currentSource === sourceAtStart) document.getElementById('sync-status').textContent = 'Sync failed';
         }
     } catch (e) {
-        document.getElementById('sync-status').textContent = 'Sync error';
+        if (currentSource === sourceAtStart) document.getElementById('sync-status').textContent = 'Sync error';
     } finally {
         btn.classList.remove('syncing');
         btn.disabled = false;

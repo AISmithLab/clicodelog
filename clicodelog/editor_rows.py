@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .editors import cursor_slug
 from .sync_vscode import EMPTY_WINDOW
+from .utils import encode_path_id
 
 NO_WORKSPACE = "_no-workspace"
 
@@ -32,6 +33,11 @@ def session_files(source_id: str, data_dir: Path, listed=None):
     is then the only copy of that chat.) The index passes it; other callers get
     the plain by-id rule.
     """
+    if source_id in ("copilot", "antigravity"):
+        ext = "jsonl" if source_id == "copilot" else "json"
+        for f in sorted((data_dir / "sessions").glob(f"*.{ext}")):
+            yield f, f.parent
+        return
     if source_id == "vscode":
         for ws in sorted(p for p in data_dir.iterdir() if p.is_dir()):
             chats = ws / "chatSessions"
@@ -113,6 +119,9 @@ def subagent_counts(data_dir: Path) -> dict:
 def project_for(source_id: str, f: Path, project_dir: Path, info: dict,
                 folders: dict, subs: dict) -> tuple:
     """(project_id, project_name, parent_session, subagent_count_override)."""
+    if source_id in ("copilot", "antigravity"):
+        cwd = info["cwd"]
+        return encode_path_id(cwd) if cwd else NO_WORKSPACE, cwd or "(no workspace)", None, None
     if source_id == "vscode":
         name = info["cwd"] or ("(no folder open)" if project_dir.name.endswith(EMPTY_WINDOW)
                                else project_dir.name)
