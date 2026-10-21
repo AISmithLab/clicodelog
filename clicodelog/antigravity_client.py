@@ -14,8 +14,10 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .editors import config_root
 from .antigravity_discovery import endpoints
+from .logging_setup import get_logger
 
 SERVICE = "/exa.language_server_pb.LanguageServerService/"
+log = get_logger(__name__)
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -24,10 +26,17 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def _run(args):
+    # Cold Windows PowerShell startup and CIM initialization can exceed five
+    # seconds on shared runners and slower machines. Keep Unix probes short.
+    program = args[0].lower().removesuffix(".exe")
+    timeout = 30 if program in ("powershell", "pwsh") else 5
     try:
         return subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=5, check=False).stdout
-    except (OSError, subprocess.TimeoutExpired):
+                              errors="replace", timeout=timeout, check=False).stdout
+    except subprocess.TimeoutExpired:
+        log.warning("Antigravity discovery timed out after %s seconds (%s)", timeout, program)
+        return ""
+    except OSError:
         return ""
 
 
