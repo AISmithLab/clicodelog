@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +22,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Install
         run: |
@@ -35,6 +39,9 @@ jobs:
           PYTHONWARNDEFAULTENCODING: "1"
         run: python -W error::EncodingWarning -m pytest tests/ -q
 
+      - name: Check source switching during sync
+        run: node --test tests/js/source-refresh.test.cjs
+
       # The wheel is built and inspected because the packaging bug that shipped
       # for months was invisible to an editable install: static/js/vendor/ was
       # excluded from every published wheel, so markdown rendering and syntax
@@ -42,7 +49,7 @@ jobs:
       - name: Verify the wheel actually contains its assets
         shell: bash
         run: |
-          python -m build --wheel --outdir dist/
+          python -m build --wheel --no-isolation --outdir dist/
           python - <<'PY'
           import glob, sys, zipfile
           whl = sorted(glob.glob("dist/*.whl"))[-1]

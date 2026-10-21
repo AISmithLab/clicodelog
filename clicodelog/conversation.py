@@ -112,6 +112,11 @@ def _find_editor_file(data_dir: Path, project_id: str, session_id: str, source_i
     from . import search_index as _idx
     entry = _idx.entry_for_session(source_id, project_id, session_id)
     candidate = entry["full_path"] if entry else None
+    if source_id in ("copilot", "antigravity"):
+        # The index binds a session to its recorded workspace. Never fall back
+        # to another project's copy merely because the session id matches.
+        if candidate is None:
+            return None
     if candidate is None and source_id == "vscode":
         # A VS Code chat lives under its own workspace; never serve another
         # workspace's copy of the same id (Code and Insiders can share one).

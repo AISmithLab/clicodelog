@@ -14,6 +14,7 @@ import pytest
 
 from clicodelog import metastore, search_index, sessions
 from clicodelog.scan import scan_session
+from agent_fixtures import antigravity_snapshot, copilot_events
 
 CLAUDE_LINES = [
     {"type": "summary", "summary": "Fix the CORS hole"},
@@ -92,6 +93,10 @@ def fake_data(tmp_path, monkeypatch):
     _write_jsonl(vs / "chatSessions" / "chat-1.jsonl", VSCODE_LINES)
     _write_jsonl(root / "cursor" / "transcripts" / "Users-x-my-app" / "t1" / "t1.jsonl",
                  CURSOR_LINES)
+    _write_jsonl(root / "copilot" / "sessions" / "sample-session.jsonl", copilot_events())
+    ag = root / "antigravity" / "sessions"
+    ag.mkdir(parents=True)
+    (ag / "sample-session.json").write_text(json.dumps(antigravity_snapshot()), encoding="utf-8")
 
     monkeypatch.setattr("clicodelog.config.DATA_DIR", root)
     monkeypatch.setattr("clicodelog.metastore.DATA_DIR", root)
@@ -110,7 +115,7 @@ def fake_data(tmp_path, monkeypatch):
         del metastore._local.conn
 
 
-@pytest.mark.parametrize("source_id", ["claude-code", "codex", "gemini", "vscode", "cursor"])
+@pytest.mark.parametrize("source_id", ["claude-code", "codex", "gemini", "vscode", "cursor", "copilot", "antigravity"])
 def test_source_yields_at_least_one_session(fake_data, source_id):
     """The contract every source must meet, and the one Gemini silently broke."""
     result = search_index.refresh_index(source_id)

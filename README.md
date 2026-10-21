@@ -8,8 +8,8 @@
 <h3>Your AI coding agent just edited 30 files across 6 directories.<br>What actually happened?</h3>
 
 <p>
-Browse every session from Claude Code, OpenAI Codex, Gemini CLI, Cursor and
-VS Code (GitHub Copilot Chat) — the thinking, the tool calls, the file changes,
+Browse sessions from Claude Code, OpenAI Codex, Gemini CLI, Cursor,
+VS Code (GitHub Copilot Chat), GitHub Copilot CLI and Google Antigravity — the thinking, the tool calls, the file changes,
 the token costs. On macOS, Windows and Linux.
 All in one local interface. Nothing leaves your machine.
 </p>
@@ -195,6 +195,8 @@ clicodelog --debug              # Run in debug mode
 | **Gemini CLI** | `~/.gemini/tmp/` | ✅ Supported |
 | **Cursor** (IDE + `cursor-agent` CLI) | Cursor's user dir (see below), `~/.cursor/projects/*/agent-transcripts/`, `~/.cursor/chats/` | ✅ Supported |
 | **VS Code** (GitHub Copilot Chat) | VS Code's user dir (see below) | ✅ Supported |
+| **GitHub Copilot CLI** | `~/.copilot/session-state/` (or `$COPILOT_HOME/session-state/`) | ✅ Supported |
+| **Google Antigravity** | `~/.gemini/antigravity/conversations/`, `~/.gemini/antigravity-ide/conversations/`, `~/.gemini/antigravity-cli/conversations/` | Experimental; readable import needs the running local history service or a JSON sidecar |
 
 Cursor and VS Code keep their data in the editor's per-OS user directory:
 
@@ -266,6 +268,75 @@ next to the new one as `<id>.superseded-<time>.bak`.
 - Displays messages, thinking, tool calls with their exact arguments and
   output, file edits, model and token usage
 
+### GitHub Copilot CLI
+
+- Reads `<session-id>/events.jsonl` and the older `<session-id>.jsonl` layout,
+  separately from VS Code's Copilot Chat history
+- Groups sessions by their recorded working directory and displays prompts,
+  responses, readable reasoning, tool arguments/results, edits and recorded usage
+- Ignores streaming deltas when complete message events are present and combines
+  tool requests with their execution results
+- Preserves the previous log when a rewrite removes recorded events
+- Honours `COPILOT_HOME`; `CLICODELOG_COPILOT_DIR` can override the session-state
+  directory directly
+
+Copilot does not persist every usage event in every version. Analytics only
+include recorded counters; missing usage is not estimated. The reader follows
+GitHub's [configuration directory reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)
+and [SDK event schema](https://github.com/github/copilot-sdk/blob/main/nodejs/src/generated/session-events.ts).
+
+### Google Antigravity (experimental)
+
+Antigravity stores encrypted `.pb` files or SQLite `.db` conversations. clicodelog
+backs these up and imports readable trajectory snapshots through the running
+local language server. **Open Antigravity, select Google Antigravity in clicodelog,
+and click Sync.** Imported conversations remain browsable, searchable and
+exportable after Antigravity closes. Existing `<id>.trajectory.json` sidecars
+are also supported without a running service.
+
+- Displays user/assistant messages, readable thinking, tool calls/results,
+  recorded file edits, models and usage; keeps the complete JSON snapshot
+- Keeps earlier snapshots when a rewrite changes or removes steps
+- Takes a consistent SQLite backup including uncheckpointed WAL changes
+- Shows a source warning when encrypted backups await readable snapshots
+- Uses only the local history API; does not send prompts or execute agent tools
+
+This uses an undocumented API and has been tested with synthetic schema-based
+fixtures, not a live Antigravity service. Vendor changes may require updates.
+The JSON trajectory schema and history RPCs are described in the
+[Antigravity client source](https://github.com/jkfujinami/antigravity-client)
+and [agy-reader implementation](https://github.com/mjacobs/agy-reader).
+
+For a custom install, `CLICODELOG_ANTIGRAVITY_DIRS` is a list of Antigravity
+data roots (each containing `conversations/`), separated by `:` on macOS/Linux
+or `;` on Windows. Local endpoint discovery uses the language-server process
+and its listening ports, or the IDE's daemon logs in the per-OS Antigravity
+config directory. If automatic discovery is unavailable, set
+`CLICODELOG_ANTIGRAVITY_URL=http://127.0.0.1:<port>` and
+`ANTIGRAVITY_CSRF_TOKEN` to the running server's token. Only loopback HTTP
+endpoints are accepted; credentials are never saved in history backups.
+
+Copilot CLI and Antigravity use the same home-relative history layout on macOS,
+Windows and Linux. On Windows, `~` means the user profile directory, for example
+`%USERPROFILE%\.copilot\session-state` and `%USERPROFILE%\.gemini\antigravity`.
+Custom history locations are resolved at each sync. UTF-8 logs with or without
+a BOM and Windows CRLF line endings are supported, including paths with spaces
+and non-ASCII characters. Recorded Windows drive paths and UNC paths are kept
+when browsing a backup on another OS.
+
+| Platform | Antigravity endpoint discovery | IDE daemon log directory |
+|----------|--------------------------------|--------------------------|
+| macOS | `ps` and `lsof` | `~/Library/Application Support/Antigravity/logs` |
+| Windows | PowerShell process/socket queries with UTF-8 JSON output | `%APPDATA%\Antigravity\logs` |
+| Linux | `ps` and `lsof`, with `/proc` socket discovery when `lsof` is absent | `${XDG_CONFIG_HOME:-~/.config}/Antigravity/logs` |
+
+Both IPv4 and IPv6 loopback listeners are supported. CI runs Python tests,
+source-switching JavaScript regressions and wheel checks on all three operating
+systems with Python 3.10, 3.12 and 3.13. The tests include synthetic local HTTP
+imports, Unicode/BOM/CRLF histories and native OS socket-discovery checks.
+This does not replace validation against a running Antigravity release; its
+integration remains experimental.
+
 ---
 
 ### CLI Options
@@ -288,7 +359,7 @@ clicodelog --debug              # Run in debug mode
 - **Startup sync** — Copies logs from source directories into `~/.clicodelog/data/`
 - **Background sync** — Automatically refreshes every hour
 - **Manual sync** — Trigger a sync for the active source via UI
-- **Source switching** — Switch between Claude Code, Codex, Gemini CLI, Cursor and VS Code
+- **Source switching** — Switch between all seven sources
 
 ---
 
@@ -323,11 +394,16 @@ data/
 │   └── transcripts/
 │       └── {project-slug}/
 │           └── {id}/{id}.jsonl      # agent transcript (+ subagents/)
-└── vscode/               # VS Code Copilot Chat backup
-    └── {workspace-hash}/
-        ├── workspace.json
-        └── chatSessions/
-            └── {session-id}.jsonl
+├── vscode/               # VS Code Copilot Chat backup
+│   └── {workspace-hash}/
+│       ├── workspace.json
+│       └── chatSessions/
+│           └── {session-id}.jsonl
+├── copilot/
+│   └── sessions/{session-id}.jsonl
+└── antigravity/
+    ├── raw/{store-id}/{session-id}.pb  # or a consistent .db snapshot
+    └── sessions/{session-id}.json     # readable trajectory + summary
 ```
 
 ---
