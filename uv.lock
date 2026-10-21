@@ -237,7 +237,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "setuptools", marker = "extra == 'dev'", specifier = ">=61.0" },
+    { name = "setuptools", marker = "extra == 'dev'", specifier = ">=77.0.3" },
     { name = "twine", marker = "extra == 'dev'" },
     { name = "uvicorn", specifier = ">=0.24.0" },
     { name = "wheel", marker = "extra == 'dev'" },

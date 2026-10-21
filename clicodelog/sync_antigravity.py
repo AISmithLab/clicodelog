@@ -70,16 +70,26 @@ def _raw(src, target, stats, copy):
     """Retain earlier encrypted versions; SQLite is snapshotted with its WAL."""
     st = src.stat()
     wal = src.with_name(src.name + "-wal")
-    if src.suffix == ".db" and wal.exists() and wal.stat().st_size:
-        stamp = max(st.st_mtime, wal.stat().st_mtime)
-    else:
-        stamp = st.st_mtime
+    wal_size, stamp = 0, st.st_mtime
+    if src.suffix == ".db":
+        try:
+            wal_stat = wal.stat()
+            wal_size = wal_stat.st_size
+            if wal_size:
+                stamp = max(stamp, wal_stat.st_mtime)
+        except FileNotFoundError:
+            pass
     if target.exists() and target.stat().st_mtime >= stamp and \
             (src.suffix == ".db" or target.stat().st_size == st.st_size):
         stats["skipped"] += 1
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    if not has_free_space(target.parent, st.st_size * 2)[0]:
+    # The SQLite snapshot includes committed WAL pages. Reserve space for the
+    # new temporary database (and its journal) plus the archive of the existing
+    # target; free space already excludes the target itself.
+    archive_size = target.stat().st_size if target.exists() else 0
+    needed = (st.st_size + wal_size) * 2 + archive_size
+    if not has_free_space(target.parent, needed)[0]:
         stats["skipped_no_space"] += 1
         return
     if target.exists() and keep_superseded(target) is None:

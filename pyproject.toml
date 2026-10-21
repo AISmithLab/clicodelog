@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -53,7 +53,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "setuptools>=61.0",
+    "setuptools>=77.0.3",
     "wheel",
     "pytest>=7.0",
     "httpx",

@@ -7,7 +7,7 @@ from ..editors import uri_to_path
 from .agent_common import arguments, message, number, obj, output, records, text
 
 # Internal checkpoints and state updates are not assistant utterances.
-TOOLS = {"runCommand", "codeAction", "writeToFile", "viewFile", "viewCodeItem",
+TOOLS = {"runCommand", "shellExec", "codeAction", "writeToFile", "viewFile", "viewCodeItem",
          "listDirectory", "grepSearch", "find", "searchWeb", "readUrlContent",
          "mcpTool", "commandStatus", "sendCommandInput", "browserSubagent",
          "openBrowserUrl", "executeBrowserJavaScript", "readBrowserPage",

@@ -44,12 +44,14 @@ def _event(event, state, messages, meta, summaries):
     stamp, agent = event.get("timestamp"), text(event.get("agentId"))
     if isinstance(stamp, str):
         meta["lastUpdated"] = stamp
-    if kind in ("session.start", "session.resume", "session.context_changed"):
+    if kind in ("session.start", "session.resume"):
         context = obj(data.get("context"))
         meta["cwd"] = text(context.get("cwd")) or meta["cwd"]
         if kind == "session.start":
             meta["startTime"] = text(data.get("startTime")) or text(stamp)
             state["model"] = text(data.get("selectedModel") or data.get("model"))
+    elif kind == "session.context_changed":
+        meta["cwd"] = text(data.get("cwd")) or meta["cwd"]
     elif kind == "session.title_changed":
         title = text(data.get("title"))
         if title:
@@ -68,7 +70,14 @@ def _event(event, state, messages, meta, summaries):
         if previous and (previous["content"] or previous["tool_uses"]):
             state["owners"].pop(agent)
         owner = _owner(event, state, messages)
-        owner["thinking"] = text(data.get("content")) or None
+        # Completed blocks have separate identities; repeated delivery of one
+        # block must not discard its neighbours or duplicate its text.
+        blocks = state["reasoning_blocks"].setdefault(id(owner), {})
+        content = text(data.get("content"))
+        key = text(data.get("reasoningId") or event.get("id")) or f"block-{len(blocks)}"
+        if content:
+            blocks[key] = content
+        owner["thinking"] = "\n\n".join(blocks.values()) or None
     elif kind == "assistant.message":
         # Reasoning immediately preceding a message belongs to that response.
         owner = state["owners"].get(agent)
@@ -79,7 +88,12 @@ def _event(event, state, messages, meta, summaries):
         owner.update(content=text(data.get("content")),
                      uuid=text(data.get("messageId") or event.get("id")) or None,
                      model=text(data.get("model")) or state["model"] or None)
-        owner["thinking"] = text(data.get("reasoningText")) or owner["thinking"]
+        inline = text(data.get("reasoningText"))
+        thinking = owner["thinking"] or ""
+        if inline and thinking in inline:
+            owner["thinking"] = inline
+        elif inline and inline not in thinking:
+            owner["thinking"] = "\n\n".join(filter(None, (thinking, inline)))
         if data.get("outputTokens") is not None:
             owner["usage"] = {"output_tokens": number(data["outputTokens"])}
         for request in records(data.get("toolRequests")):
@@ -110,7 +124,7 @@ def _event(event, state, messages, meta, summaries):
 def parse_copilot_conversation(path: Path, session_id: str) -> dict:
     messages, summaries = [], []
     meta = {"cwd": "", "startTime": None, "lastUpdated": None}
-    state = {"model": "", "calls": {}, "owners": {}}
+    state = {"model": "", "calls": {}, "owners": {}, "reasoning_blocks": {}}
     seen = set()
     with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
         for line in fh:
